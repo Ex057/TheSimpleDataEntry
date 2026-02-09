@@ -353,6 +353,19 @@ fun LoginScreen(
                 }
             }
 
+            LaunchedEffect(selectedProfileId, isAddingNew) {
+                if (!isAddingNew) {
+                    selectedProfile?.let { profile ->
+                        if (serverUrl.isBlank() || serverUrl == "https://") {
+                            serverUrl = profile.serverUrl
+                        }
+                        if (username.isBlank()) {
+                            username = profile.username
+                        }
+                    }
+                }
+            }
+
             val gradientBrush = Brush.verticalGradient(
                 colors = listOf(DHIS2Blue, DHIS2BlueDark)
             )
@@ -936,11 +949,21 @@ fun LoginScreen(
 
                                 Button(
                                     onClick = {
-                                        viewModel.loginWithProgress(serverUrl, username, password, context)
+                                        val resolvedServerUrl = if (showPasswordOnly) {
+                                            selectedProfile?.serverUrl.orEmpty()
+                                        } else {
+                                            serverUrl
+                                        }
+                                        val resolvedUsername = if (showPasswordOnly) {
+                                            selectedProfile?.username.orEmpty()
+                                        } else {
+                                            username
+                                        }
+                                        viewModel.loginWithProgress(resolvedServerUrl, resolvedUsername, password, context)
                                     },
                                     enabled = !isLoading &&
-                                            (if (showFullForm) serverUrl.isNotBlank() else true) &&
-                                            (if (showFullForm) username.isNotBlank() else true) &&
+                                            (if (showFullForm) serverUrl.isNotBlank() else selectedProfile?.serverUrl?.isNotBlank() == true) &&
+                                            (if (showFullForm) username.isNotBlank() else selectedProfile?.username?.isNotBlank() == true) &&
                                             password.isNotBlank(),
                                     modifier = Modifier
                                         .weight(1f)
