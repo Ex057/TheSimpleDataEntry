@@ -49,9 +49,14 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                     .byDataSetUids(listOf(datasetId))
                     .get().await()
 
-                val scopedIds = scopedOrgUnits.map { it.uid() }.toSet()
-                val attachedIds = attachedOrgUnits.map { it.uid() }.toSet()
+                val scopedIds = scopedOrgUnits.mapNotNull { it.uid() }.filter { it.isNotBlank() }.toSet()
+                val attachedIds = attachedOrgUnits.mapNotNull { it.uid() }.filter { it.isNotBlank() }.toSet()
                 val relevantOrgUnitIds = scopedIds.intersect(attachedIds).ifEmpty { scopedIds }
+
+                if (relevantOrgUnitIds.isEmpty()) {
+                    Log.e(TAG, "No relevant org unit ids available for dataset $datasetId")
+                    return@withContext emptyList()
+                }
 
                 Log.d(
                     TAG,
@@ -59,26 +64,25 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                 )
 
                 // Get dataset instances across all relevant org units
-                val instanceCount = d2.dataSetModule()
-                    .dataSetInstances()
-                    .byDataSetUid().eq(datasetId)
-                    .byOrganisationUnitUid().`in`(relevantOrgUnitIds.toList())
-                    .blockingCount()
-
                 val instances = d2.dataSetModule()
                     .dataSetInstances()
                     .byDataSetUid().eq(datasetId)
                     .byOrganisationUnitUid().`in`(relevantOrgUnitIds.toList())
                     .get().await()
 
-                Log.d(TAG, "Found $instanceCount instances for dataset")
                 Log.d(TAG, "Loaded ${instances.size} instances for dataset")
 
 
                 val sdkInstances = instances.map { instance ->
-                    Log.d(TAG, "Processing SDK instance: ${instance.id()} | datasetId: ${instance.dataSetUid()} | period: ${instance.period()} | orgUnit: ${instance.organisationUnitUid()} | attributeOptionComboUid: ${instance.attributeOptionComboUid()} | attributeOptionComboDisplayName: ${instance.attributeOptionComboDisplayName()}")
+                    val instanceId = listOf(
+                        instance.dataSetUid(),
+                        instance.period(),
+                        instance.organisationUnitUid(),
+                        instance.attributeOptionComboUid()
+                    ).joinToString("|")
+                    Log.d(TAG, "Processing SDK instance: $instanceId | datasetId: ${instance.dataSetUid()} | period: ${instance.period()} | orgUnit: ${instance.organisationUnitUid()} | attributeOptionComboUid: ${instance.attributeOptionComboUid()} | attributeOptionComboDisplayName: ${instance.attributeOptionComboDisplayName()}")
                     DatasetInstance(
-                        id = instance.id().toString(),
+                        id = instanceId,
                         datasetId = instance.dataSetUid(),
                         period = Period(id = instance.period()),
                         organisationUnit = com.ash.simpledataentry.domain.model.OrganisationUnit(
