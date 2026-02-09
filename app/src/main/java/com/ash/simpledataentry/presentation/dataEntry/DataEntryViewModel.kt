@@ -219,12 +219,20 @@ class DataEntryViewModel @Inject constructor(
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val attributeOptionCombos = repository.getAttributeOptionCombos(datasetId)
+                val resolvedAttributeOptionCombo = resolveAssignableAttributeOptionCombo(
+                    datasetId = datasetId,
+                    period = period,
+                    orgUnitId = orgUnitId,
+                    preferredAttributeOptionCombo = attributeOptionCombo,
+                    attributeOptionCombos = attributeOptionCombos
+                )
                 val editabilityDeferred = async {
                     resolveDatasetEditability(
                         datasetId = datasetId,
                         period = period,
                         orgUnitId = orgUnitId,
-                        attributeOptionCombo = attributeOptionCombo
+                        attributeOptionCombo = resolvedAttributeOptionCombo
                     )
                 }
                 val completionDeferred = async {
@@ -232,7 +240,7 @@ class DataEntryViewModel @Inject constructor(
                         datasetId = datasetId,
                         period = period,
                         orgUnitId = orgUnitId,
-                        attributeOptionCombo = attributeOptionCombo
+                        attributeOptionCombo = resolvedAttributeOptionCombo
                     )
                 }
                 val initialProgress = com.ash.simpledataentry.presentation.core.NavigationProgress(
@@ -250,7 +258,7 @@ class DataEntryViewModel @Inject constructor(
                         datasetName = datasetName,
                         period = period,
                         orgUnit = orgUnitId,
-                        attributeOptionCombo = attributeOptionCombo,
+                        attributeOptionCombo = resolvedAttributeOptionCombo,
                         isEditMode = isEditMode,
                         navigationProgress = initialProgress
                     )
@@ -274,13 +282,9 @@ class DataEntryViewModel @Inject constructor(
                 }
 
                 val drafts = withContext(Dispatchers.IO) {
-                    draftDao.getDraftsForInstance(datasetId, period, orgUnitId, attributeOptionCombo)
+                    draftDao.getDraftsForInstance(datasetId, period, orgUnitId, resolvedAttributeOptionCombo)
                 }
                 val draftMap = drafts.associateBy { it.dataElement to it.categoryOptionCombo }
-
-                val attributeOptionComboDeferred = async {
-                    repository.getAttributeOptionCombos(datasetId)
-                }
 
                 // Step 2: Load Data Values (30-50%)
                 updateState {
@@ -295,7 +299,7 @@ class DataEntryViewModel @Inject constructor(
                     )
                 }
 
-                val dataValuesFlow = repository.getDataValues(datasetId, period, orgUnitId, attributeOptionCombo)
+                val dataValuesFlow = repository.getDataValues(datasetId, period, orgUnitId, resolvedAttributeOptionCombo)
                 var refreshTriggered = false
                 dataValuesFlow.collect { values ->
                     // Step 3: Process Categories (50-70%)
@@ -354,8 +358,8 @@ class DataEntryViewModel @Inject constructor(
                     val nonDefaultCount = categoryComboStructures.values.count { it.isNotEmpty() }
                     Log.d("DataEntryViewModel", "Non-default structures: $nonDefaultCount")
 
-                    val attributeOptionCombos = attributeOptionComboDeferred.await()
-                    val attributeOptionComboName = attributeOptionCombos.find { it.first == attributeOptionCombo }?.second ?: attributeOptionCombo
+                    val attributeOptionComboName = attributeOptionCombos.find { it.first == resolvedAttributeOptionCombo }?.second
+                        ?: resolvedAttributeOptionCombo
 
                     val mergedValues = values.map { fetched ->
                         val key = fetched.dataElement to fetched.categoryOptionCombo
@@ -611,6 +615,66 @@ class DataEntryViewModel @Inject constructor(
         } catch (e: Exception) {
             Log.w("DataEntryViewModel", "Failed to resolve dataset editability", e)
             true to null
+        }
+    }
+
+    private suspend fun resolveAssignableAttributeOptionCombo(
+        datasetId: String,
+        period: String,
+        orgUnitId: String,
+        preferredAttributeOptionCombo: String,
+        attributeOptionCombos: List<Pair<String, String>>
+    ): String = withContext(Dispatchers.IO) {
+        if (preferredAttributeOptionCombo.isNotBlank() &&
+            isAttributeOptionComboAssignable(datasetId, period, orgUnitId, preferredAttributeOptionCombo)
+        ) {
+            return@withContext preferredAttributeOptionCombo
+        }
+
+        val comboCandidates = attributeOptionCombos.map { it.first }.filter { it.isNotBlank() }
+        for (comboUid in comboCandidates) {
+            if (isAttributeOptionComboAssignable(datasetId, period, orgUnitId, comboUid)) {
+                return@withContext comboUid
+            }
+        }
+
+        preferredAttributeOptionCombo
+    }
+
+    private suspend fun isAttributeOptionComboAssignable(
+        datasetId: String,
+        period: String,
+        orgUnitId: String,
+        comboUid: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val d2 = sessionManager.getD2() ?: return@withContext false
+        return@withContext try {
+            when (
+                val status = d2.dataSetModule()
+                    .dataSetInstanceService()
+                    .blockingGetEditableStatus(datasetId, period, orgUnitId, comboUid)
+            ) {
+                is DataSetEditableStatus.Editable -> true
+                is DataSetEditableStatus.NonEditable ->
+                    status.reason != DataSetNonEditableReason.ATTRIBUTE_OPTION_COMBO_NO_ASSIGN_TO_ORGUNIT
+            }
+        } catch (e: Exception) {
+            Log.w("DataEntryViewModel", "Failed to validate attribute option combo $comboUid", e)
+            false
+        }
+    }
+
+    suspend fun getAssignableAttributeOptionCombos(
+        datasetId: String,
+        period: String,
+        orgUnitId: String
+    ): List<Pair<String, String>> {
+        if (period.isBlank() || orgUnitId.isBlank()) {
+            return repository.getAttributeOptionCombos(datasetId)
+        }
+        val allCombos = repository.getAttributeOptionCombos(datasetId)
+        return allCombos.filter { (uid, _) ->
+            uid.isNotBlank() && isAttributeOptionComboAssignable(datasetId, period, orgUnitId, uid)
         }
     }
 

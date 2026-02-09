@@ -81,6 +81,7 @@ fun CreateNewEntryScreen(
     var showOrgUnitPicker by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var allAttributeOptionCombos by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var attributeOptionCombos by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var selectedAttributeOptionCombo by remember { mutableStateOf("") }
     var expandedAttributeOptionCombo by remember { mutableStateOf(false) }
@@ -99,13 +100,40 @@ fun CreateNewEntryScreen(
             orgUnits = viewModel.getUserOrgUnits(datasetId) // Get multiple org units
             selectedOrgUnit = orgUnits.firstOrNull() // Select first org unit by default
             defaultAttributeOptionCombo = viewModel.getDefaultAttributeOptionCombo()
-            attributeOptionCombos = viewModel.getAttributeOptionCombos(datasetId)
+            allAttributeOptionCombos = viewModel.getAttributeOptionCombos(datasetId)
+            attributeOptionCombos = allAttributeOptionCombos
             selectedAttributeOptionCombo = attributeOptionCombos.firstOrNull()?.first
                 ?: defaultAttributeOptionCombo
             isLoading = false
         } catch (e: Exception) {
             error = e.message ?: "Failed to load data"
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(selectedOrgUnit?.id, selectedPeriod) {
+        val orgUnitId = selectedOrgUnit?.id.orEmpty()
+        if (orgUnitId.isBlank() || selectedPeriod.isBlank()) {
+            return@LaunchedEffect
+        }
+        try {
+            val filtered = viewModel.getAssignableAttributeOptionCombos(
+                datasetId = datasetId,
+                period = selectedPeriod,
+                orgUnitId = orgUnitId
+            )
+            attributeOptionCombos = filtered
+            selectedAttributeOptionCombo = filtered.firstOrNull()?.first
+                ?: defaultAttributeOptionCombo
+        } catch (e: Exception) {
+            attributeOptionCombos = allAttributeOptionCombos
+            selectedAttributeOptionCombo = allAttributeOptionCombos.firstOrNull()?.first
+                ?: defaultAttributeOptionCombo
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(
+                    e.message ?: "Failed to load attribute option combos"
+                )
+            }
         }
     }
 
@@ -138,9 +166,11 @@ fun CreateNewEntryScreen(
                 val resolvedAttributeOptionCombo = selectedAttributeOptionCombo.ifBlank {
                     defaultAttributeOptionCombo
                 }
+                val hasAssignableAttributeCombo = attributeOptionCombos.isNotEmpty()
                 val canContinue = selectedOrgUnit != null &&
                     selectedPeriod.isNotEmpty() &&
-                    resolvedAttributeOptionCombo.isNotEmpty()
+                    resolvedAttributeOptionCombo.isNotEmpty() &&
+                    hasAssignableAttributeCombo
                 val selectedAttrComboName = attributeOptionCombos
                     .find { it.first == resolvedAttributeOptionCombo }
                     ?.second
@@ -168,6 +198,30 @@ fun CreateNewEntryScreen(
                                 .padding(20.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
+                            if (selectedOrgUnit != null && selectedPeriod.isNotEmpty() && attributeOptionCombos.isEmpty()) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.errorContainer,
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Editing locked",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                        Text(
+                                            text = "Attribute option combo is not assigned to this organisation unit. Please choose another org unit or contact your administrator.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                    }
+                                }
+                            }
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
