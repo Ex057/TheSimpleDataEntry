@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import com.ash.simpledataentry.data.local.DataElementDao
 import com.ash.simpledataentry.data.local.CategoryComboDao
 import com.ash.simpledataentry.data.local.CategoryOptionComboDao
+import com.ash.simpledataentry.data.local.CategoryOptionComboEntity
 import com.ash.simpledataentry.data.local.OrganisationUnitDao
 import com.ash.simpledataentry.util.NetworkUtils
 import com.ash.simpledataentry.data.local.DataValueEntity
@@ -235,11 +236,83 @@ class DataEntryRepositoryImpl @Inject constructor(
         }
 
         // Build DataValue objects using cached metadata and data, prioritizing drafts
+        val comboOverrides = mutableMapOf<String, List<CategoryOptionComboEntity>>()
+        val uniqueComboIds = optimizedData.dataElements.values.mapNotNull { it.categoryComboId }.distinct()
+        uniqueComboIds.forEach { comboId ->
+            val roomCombos = optimizedData.categoryOptionCombos.values.filter { it.categoryComboId == comboId }
+            val structure = metadataCacheService.getCategoryComboStructureByComboUid(comboId)
+            val expectedCount = structure.fold(1) { acc, pair ->
+                val size = pair.second.size
+                if (size == 0) acc else acc * size
+            }
+            val shouldFetchFromSdk = when {
+                expectedCount > 0 -> roomCombos.size < expectedCount
+                else -> roomCombos.size <= 2
+            }
+            if (shouldFetchFromSdk) {
+                Log.w(
+                    "DataEntryRepositoryImpl",
+                    "ComboId=$comboId has ${roomCombos.size}/${if (expectedCount > 0) expectedCount else "unknown"} COCs in Room. Fetching from SDK..."
+                )
+                val sdkCombos = metadataCacheService.fetchCategoryOptionCombosByComboUid(comboId)
+                if (sdkCombos.isNotEmpty()) {
+                    comboOverrides[comboId] = sdkCombos
+                    withContext(Dispatchers.IO) {
+                        categoryOptionComboDao.insertAll(sdkCombos)
+                    }
+                }
+            }
+        }
+        run {
+            val debugComboId = "Opey7znPz0U"
+            val debugCombos = comboOverrides[debugComboId]
+                ?: optimizedData.categoryOptionCombos.values.filter { it.categoryComboId == debugComboId }
+            Log.d(
+                "DataEntryRepositoryImpl",
+                "DEBUG comboId=$debugComboId -> ${debugCombos.size} COCs loaded from Room"
+            )
+            debugCombos.take(10).forEach { coc ->
+                Log.d(
+                    "DataEntryRepositoryImpl",
+                    "  DEBUG COC id=${coc.id}, name=${coc.name}, optionUids=${coc.optionUids}"
+                )
+            }
+        }
+        val loggedComboIds = mutableSetOf<String>()
         val mappedDataValues = optimizedData.sections.flatMap { section ->
             val sectionResults = section.dataElementUids.flatMap { deUid ->
                 val dataElement = optimizedData.dataElements[deUid]
                 val comboId = dataElement?.categoryComboId ?: ""
-                val combos = optimizedData.categoryOptionCombos.values.filter { it.categoryComboId == comboId }
+                val combos = comboOverrides[comboId]
+                    ?: optimizedData.categoryOptionCombos.values.filter { it.categoryComboId == comboId }
+
+                if (deUid == "mZeRxcTNykN") {
+                    Log.d(
+                        "DataEntryRepositoryImpl",
+                        "DEBUG DE mZeRxcTNykN -> comboId=$comboId, combos=${combos.size}, dataElementExists=${dataElement != null}"
+                    )
+                    combos.take(10).forEach { coc ->
+                        Log.d(
+                            "DataEntryRepositoryImpl",
+                            "  DEBUG mZeRxcTNykN COC id=${coc.id}, name=${coc.name}, optionUids=${coc.optionUids}"
+                        )
+                    }
+                }
+
+                if (comboId.isNotBlank() && loggedComboIds.add(comboId)) {
+                    Log.d(
+                        "DataEntryRepositoryImpl",
+                        "ComboId=$comboId has ${combos.size} categoryOptionCombos in Room for dataset=$datasetId"
+                    )
+                    if (combos.isNotEmpty()) {
+                        combos.take(10).forEach { coc ->
+                            Log.d(
+                                "DataEntryRepositoryImpl",
+                                "  COC id=${coc.id}, name=${coc.name}, optionUids=${coc.optionUids}"
+                            )
+                        }
+                    }
+                }
 
                 // Get display name with proper fallback hierarchy
                 val dataElementName = getDataElementDisplayName(deUid) ?: dataElement?.name ?: deUid

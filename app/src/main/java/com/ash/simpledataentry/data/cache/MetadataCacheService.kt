@@ -252,12 +252,17 @@ class MetadataCacheService @Inject constructor(
     suspend fun getCategoryComboStructure(categoryComboUid: String): List<Pair<String, List<Pair<String, String>>>> {
         return categoryComboStructureCache.getOrPut(categoryComboUid) {
             try {
+                Log.d("MetadataCacheService", "Category combo structure request for comboUid=$categoryComboUid")
                 // Get the category option combo to find its category combo
                 val categoryOptionCombo = d2.categoryModule().categoryOptionCombos()
                     .uid(categoryComboUid)
                     .blockingGet() ?: return@getOrPut emptyList()
 
                 val actualCategoryComboUid = categoryOptionCombo.categoryCombo()
+                Log.d(
+                    "MetadataCacheService",
+                    "Resolved categoryComboUid=${actualCategoryComboUid?.uid()} from categoryOptionCombo=${categoryOptionCombo.uid()}"
+                )
 
                 // Get the category combo with its categories
                 val categoryCombo = d2.categoryModule().categoryCombos()
@@ -266,6 +271,10 @@ class MetadataCacheService @Inject constructor(
                     .blockingGet() ?: return@getOrPut emptyList()
 
                 val categories = categoryCombo.categories() ?: emptyList()
+                Log.d(
+                    "MetadataCacheService",
+                    "CategoryCombo ${categoryCombo.displayName() ?: categoryCombo.uid()} has ${categories.size} categories"
+                )
                 if (categories.isEmpty()) return@getOrPut emptyList()
 
                 // Process categories in the order returned by SDK (maintains metadata order)
@@ -284,6 +293,12 @@ class MetadataCacheService @Inject constructor(
                     }
 
                     Log.d("MetadataCacheService", "Category $catIndex: ${category.displayName()} with ${optionPairs.size} options")
+                    if (optionPairs.isNotEmpty()) {
+                        Log.d(
+                            "MetadataCacheService",
+                            "Category ${category.displayName()} options: ${optionPairs.joinToString { it.second }}"
+                        )
+                    }
 
                     (category.displayName() ?: category.uid()) to optionPairs
                 }
@@ -291,6 +306,74 @@ class MetadataCacheService @Inject constructor(
                 Log.e("MetadataCacheService", "Error getting category combo structure", e)
                 emptyList()
             }
+        }
+    }
+
+    /**
+     * Get category combo structure using a categoryCombo uid directly (no COC indirection).
+     */
+    suspend fun getCategoryComboStructureByComboUid(
+        categoryComboUid: String
+    ): List<Pair<String, List<Pair<String, String>>>> = withContext(Dispatchers.IO) {
+        try {
+            Log.d("MetadataCacheService", "Loading category combo structure by combo uid: $categoryComboUid")
+            val categoryCombo = d2.categoryModule().categoryCombos()
+                .withCategories()
+                .uid(categoryComboUid)
+                .blockingGet() ?: return@withContext emptyList()
+
+            val categories = categoryCombo.categories() ?: emptyList()
+            Log.d(
+                "MetadataCacheService",
+                "Combo ${categoryCombo.displayName() ?: categoryCombo.uid()} has ${categories.size} categories"
+            )
+            if (categories.isEmpty()) return@withContext emptyList()
+
+            categories.mapNotNull { catRef ->
+                val category = d2.categoryModule().categories()
+                    .withCategoryOptions()
+                    .uid(catRef.uid())
+                    .blockingGet() ?: return@mapNotNull null
+
+                val options = category.categoryOptions() ?: emptyList()
+                val optionPairs = options.map { optRef ->
+                    optRef.uid() to (optRef.displayName() ?: optRef.uid())
+                }
+                Log.d(
+                    "MetadataCacheService",
+                    "Category ${category.displayName() ?: category.uid()} has ${optionPairs.size} options"
+                )
+                (category.displayName() ?: category.uid()) to optionPairs
+            }
+        } catch (e: Exception) {
+            Log.e("MetadataCacheService", "Error getting category combo structure by combo uid", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Fetch category option combos directly from SDK by category combo uid.
+     */
+    suspend fun fetchCategoryOptionCombosByComboUid(
+        categoryComboUid: String
+    ): List<com.ash.simpledataentry.data.local.CategoryOptionComboEntity> = withContext(Dispatchers.IO) {
+        try {
+            val combos = d2.categoryModule().categoryOptionCombos()
+                .byCategoryComboUid().eq(categoryComboUid)
+                .withCategoryOptions()
+                .blockingGet()
+
+            combos.map { coc ->
+                com.ash.simpledataentry.data.local.CategoryOptionComboEntity(
+                    id = coc.uid(),
+                    name = coc.displayName() ?: coc.uid(),
+                    categoryComboId = coc.categoryCombo()?.uid() ?: categoryComboUid,
+                    optionUids = coc.categoryOptions()?.joinToString(",") { opt -> opt.uid() } ?: ""
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("MetadataCacheService", "Error fetching category option combos by combo uid", e)
+            emptyList()
         }
     }
     

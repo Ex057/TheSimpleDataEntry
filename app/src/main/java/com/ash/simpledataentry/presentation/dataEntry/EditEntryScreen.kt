@@ -6,11 +6,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.border
+import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DateRange
@@ -63,13 +64,16 @@ import androidx.compose.ui.platform.LocalContext
 import com.ash.simpledataentry.presentation.core.CompletionAction
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.onFocusChanged
 import com.ash.simpledataentry.presentation.core.Section
 import com.ash.simpledataentry.presentation.core.SectionNavigationBar
 import com.ash.simpledataentry.presentation.core.Subsection
 import com.ash.simpledataentry.presentation.core.LoadingOperation
 import com.ash.simpledataentry.presentation.core.LoadingProgress
 import com.ash.simpledataentry.presentation.core.UiState
+import com.ash.simpledataentry.ui.theme.LocalFormColors
+import com.ash.simpledataentry.ui.theme.LocalFormDimensions
+import com.ash.simpledataentry.ui.theme.LocalFormTypography
 
 data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
@@ -81,6 +85,13 @@ private data class ParsedGridField(
     val columnTitle: String,
     val dataValue: DataValue
 )
+
+private data class GridCellData(
+    val columnTitle: String,
+    val dataValue: DataValue?
+)
+
+private val GridRowHeaderWidth = 120.dp
 
 private fun parseGridLabel(name: String): Pair<String, String>? {
     // Only split on primary separators between row and column.
@@ -230,9 +241,11 @@ fun DataValueField(
     enabled: Boolean = true,
     showLabel: Boolean = true,
     labelOverride: String? = null,
-    compact: Boolean = false
+    compact: Boolean = false,
+    inputModifier: Modifier = Modifier
 ) {
     val effectiveShowLabel = showLabel && LocalShowFieldLabel.current
+    val formDimensions = LocalFormDimensions.current
     val key = remember(dataValue.dataElement, dataValue.categoryOptionCombo) {
         "${dataValue.dataElement}|${dataValue.categoryOptionCombo}"
     }
@@ -271,8 +284,8 @@ fun DataValueField(
         modifier = Modifier
             .fillMaxWidth()
             .padding(
-                horizontal = if (compact) 0.dp else 16.dp,
-                vertical = if (compact) 2.dp else 4.dp
+                horizontal = if (compact) 0.dp else formDimensions.rowHorizontalPadding,
+                vertical = if (compact) 2.dp else formDimensions.rowVerticalPadding
             )
             .let { base ->
                 if (!effectiveEnabled) {
@@ -303,7 +316,7 @@ fun DataValueField(
                                     onValueChange(selectedCode)
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = inputModifier.fillMaxWidth()
                         )
                     }
                     RenderType.RADIO_BUTTONS -> {
@@ -318,7 +331,7 @@ fun DataValueField(
                                     onValueChange(selectedCode)
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = inputModifier.fillMaxWidth()
                         )
                     }
                     RenderType.YES_NO_BUTTONS -> {
@@ -332,7 +345,7 @@ fun DataValueField(
                                     onValueChange(newValue)
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = inputModifier.fillMaxWidth()
                         )
                     }
                     else -> {
@@ -347,7 +360,7 @@ fun DataValueField(
                                     onValueChange(selectedCode)
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = inputModifier.fillMaxWidth()
                         )
                     }
                 }
@@ -422,6 +435,7 @@ fun DataValueField(
                         }
                     },
                     modifier = Modifier
+                        .then(inputModifier)
                         .fillMaxWidth()
                         .clickable(enabled = effectiveEnabled) { showDatePicker = true }
                 )
@@ -481,62 +495,317 @@ fun DataValueField(
                     isError = dataValue.validationState == ValidationState.ERROR || error != null,
                     enabled = effectiveEnabled,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = inputModifier.fillMaxWidth()
                 )
             }
             dataValue.dataEntryType == DataEntryType.NUMBER ||
                     dataValue.dataEntryType == DataEntryType.INTEGER ||
                     dataValue.dataEntryType == DataEntryType.POSITIVE_INTEGER ||
                     dataValue.dataEntryType == DataEntryType.NEGATIVE_INTEGER -> {
-                InputNumber(
-                    title = labelText,
-                    state = when {
-                        !effectiveEnabled -> InputShellState.DISABLED
-                        dataValue.validationState == ValidationState.ERROR || error != null -> InputShellState.ERROR
-                        dataValue.validationState == ValidationState.WARNING || warning != null -> InputShellState.WARNING
-                        else -> InputShellState.UNFOCUSED
-                    },
-                    inputTextFieldValue = fieldState,
-                    onValueChanged = { newValue ->
-                        if (newValue != null && effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (compact) {
+                    GridNumericField(
+                        dataValue = dataValue,
+                        fieldState = fieldState,
+                        enabled = effectiveEnabled,
+                        error = dataValue.validationState == ValidationState.ERROR || error != null,
+                        warning = dataValue.validationState == ValidationState.WARNING || warning != null,
+                        onValueChanged = { newValue ->
+                            if (effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
+                        },
+                        modifier = inputModifier
+                    )
+                } else {
+                    StyledNumericField(
+                        labelText = labelText,
+                        dataValue = dataValue,
+                        fieldState = fieldState,
+                        enabled = effectiveEnabled,
+                        error = dataValue.validationState == ValidationState.ERROR || error != null,
+                        warning = dataValue.validationState == ValidationState.WARNING || warning != null,
+                        onValueChanged = { newValue ->
+                            if (effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
+                        },
+                        modifier = inputModifier.fillMaxWidth()
+                    )
+                }
             }
             dataValue.dataEntryType == DataEntryType.PERCENTAGE -> {
-                InputText(
-                    title = labelText,
-                    state = when {
-                        !effectiveEnabled -> InputShellState.DISABLED
-                        dataValue.validationState == ValidationState.ERROR || error != null -> InputShellState.ERROR
-                        dataValue.validationState == ValidationState.WARNING || warning != null -> InputShellState.WARNING
-                        else -> InputShellState.UNFOCUSED
-                    },
-                    inputTextFieldValue = fieldState,
-                    onValueChanged = { newValue ->
-                        if (newValue != null && effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (compact) {
+                    GridNumericField(
+                        dataValue = dataValue,
+                        fieldState = fieldState,
+                        enabled = effectiveEnabled,
+                        error = dataValue.validationState == ValidationState.ERROR || error != null,
+                        warning = dataValue.validationState == ValidationState.WARNING || warning != null,
+                        onValueChanged = { newValue ->
+                            if (effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
+                        },
+                        modifier = inputModifier
+                    )
+                } else {
+                    StyledNumericField(
+                        labelText = labelText,
+                        dataValue = dataValue,
+                        fieldState = fieldState,
+                        enabled = effectiveEnabled,
+                        error = dataValue.validationState == ValidationState.ERROR || error != null,
+                        warning = dataValue.validationState == ValidationState.WARNING || warning != null,
+                        onValueChanged = { newValue ->
+                            if (effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
+                        },
+                        modifier = inputModifier.fillMaxWidth()
+                    )
+                }
             }
             else -> {
-                InputText(
-                    title = labelText,
-                    state = when {
-                        !effectiveEnabled -> InputShellState.DISABLED
-                        dataValue.validationState == ValidationState.ERROR || error != null -> InputShellState.ERROR
-                        dataValue.validationState == ValidationState.WARNING || warning != null -> InputShellState.WARNING
-                        else -> InputShellState.UNFOCUSED
-                    },
-                    inputTextFieldValue = fieldState,
-                    onValueChanged = { newValue ->
-                        if (newValue != null && effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (compact) {
+                    InputText(
+                        title = labelText,
+                        state = when {
+                            !effectiveEnabled -> InputShellState.DISABLED
+                            dataValue.validationState == ValidationState.ERROR || error != null -> InputShellState.ERROR
+                            dataValue.validationState == ValidationState.WARNING || warning != null -> InputShellState.WARNING
+                            else -> InputShellState.UNFOCUSED
+                        },
+                        inputTextFieldValue = fieldState,
+                        onValueChanged = { newValue ->
+                            if (newValue != null && effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
+                        },
+                        modifier = inputModifier.fillMaxWidth()
+                    )
+                } else {
+                    StyledTextField(
+                        labelText = labelText,
+                        fieldState = fieldState,
+                        enabled = effectiveEnabled,
+                        error = dataValue.validationState == ValidationState.ERROR || error != null,
+                        warning = dataValue.validationState == ValidationState.WARNING || warning != null,
+                        keyboardType = KeyboardType.Text,
+                        onValueChanged = { newValue ->
+                            if (effectiveEnabled) viewModel.onFieldValueChange(newValue, dataValue)
+                        },
+                        modifier = inputModifier.fillMaxWidth()
+                    )
+                }
             }
         }
     }
+}
+
+@Composable
+private fun GridNumericField(
+    dataValue: DataValue,
+    fieldState: TextFieldValue,
+    enabled: Boolean,
+    error: Boolean,
+    warning: Boolean,
+    onValueChanged: (TextFieldValue) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val formColors = LocalFormColors.current
+    val formDimensions = LocalFormDimensions.current
+    val formTypography = LocalFormTypography.current
+    val allowDecimal = dataValue.dataEntryType == DataEntryType.NUMBER ||
+        dataValue.dataEntryType == DataEntryType.PERCENTAGE
+    val allowNegative = dataValue.dataEntryType == DataEntryType.NEGATIVE_INTEGER ||
+        dataValue.dataEntryType == DataEntryType.NUMBER
+    val keyboardType = if (allowDecimal) KeyboardType.Decimal else KeyboardType.Number
+    val warningColor = MaterialTheme.colorScheme.tertiary
+    val focusedBorder = when {
+        error -> formColors.gridBorderError
+        warning -> warningColor
+        else -> formColors.gridBorderFocused
+    }
+    val unfocusedBorder = when {
+        error -> formColors.gridBorderError
+        warning -> warningColor
+        else -> formColors.gridBorder
+    }
+
+    OutlinedTextField(
+        value = fieldState,
+        onValueChange = { newValue ->
+            if (!enabled) return@OutlinedTextField
+            val cleaned = sanitizeNumericInput(newValue.text, allowDecimal, allowNegative)
+            onValueChanged(newValue.copy(text = cleaned))
+        },
+        enabled = enabled,
+        isError = error,
+        singleLine = true,
+        textStyle = formTypography.gridCell.copy(color = formColors.gridCellText),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        shape = RoundedCornerShape(formDimensions.fieldCornerRadius),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = formColors.gridCellBackground,
+            unfocusedContainerColor = formColors.gridCellBackground,
+            disabledContainerColor = formColors.gridCellBackground.copy(alpha = 0.6f),
+            focusedBorderColor = focusedBorder,
+            unfocusedBorderColor = unfocusedBorder,
+            errorBorderColor = formColors.gridBorderError,
+            cursorColor = formColors.gridBorderFocused,
+            focusedTextColor = formColors.gridCellText,
+            unfocusedTextColor = formColors.gridCellText,
+            disabledTextColor = formColors.gridCellText.copy(alpha = 0.6f),
+            focusedPlaceholderColor = formColors.gridCellPlaceholder,
+            unfocusedPlaceholderColor = formColors.gridCellPlaceholder,
+            disabledPlaceholderColor = formColors.gridCellPlaceholder.copy(alpha = 0.7f)
+        ),
+        modifier = modifier
+            .heightIn(min = formDimensions.gridCellHeight)
+    )
+}
+
+@Composable
+private fun StyledNumericField(
+    labelText: String,
+    dataValue: DataValue,
+    fieldState: TextFieldValue,
+    enabled: Boolean,
+    error: Boolean,
+    warning: Boolean,
+    onValueChanged: (TextFieldValue) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val formColors = LocalFormColors.current
+    val formDimensions = LocalFormDimensions.current
+    val allowDecimal = dataValue.dataEntryType == DataEntryType.NUMBER ||
+        dataValue.dataEntryType == DataEntryType.PERCENTAGE
+    val allowNegative = dataValue.dataEntryType == DataEntryType.NEGATIVE_INTEGER ||
+        dataValue.dataEntryType == DataEntryType.NUMBER
+    val keyboardType = if (allowDecimal) KeyboardType.Decimal else KeyboardType.Number
+    val warningColor = MaterialTheme.colorScheme.tertiary
+    val focusedBorder = when {
+        error -> formColors.gridBorderError
+        warning -> warningColor
+        else -> formColors.gridBorderFocused
+    }
+    val unfocusedBorder = when {
+        error -> formColors.gridBorderError
+        warning -> warningColor
+        else -> formColors.gridBorder
+    }
+
+    OutlinedTextField(
+        value = fieldState,
+        onValueChange = { newValue ->
+            if (!enabled) return@OutlinedTextField
+            val cleaned = sanitizeNumericInput(newValue.text, allowDecimal, allowNegative)
+            onValueChanged(newValue.copy(text = cleaned))
+        },
+        enabled = enabled,
+        isError = error,
+        singleLine = true,
+        label = { if (labelText.isNotBlank()) Text(labelText) },
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        shape = RoundedCornerShape(formDimensions.fieldCornerRadius),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = formColors.gridCellBackground,
+            unfocusedContainerColor = formColors.gridCellBackground,
+            disabledContainerColor = formColors.gridCellBackground.copy(alpha = 0.6f),
+            focusedBorderColor = focusedBorder,
+            unfocusedBorderColor = unfocusedBorder,
+            errorBorderColor = formColors.gridBorderError,
+            cursorColor = formColors.gridBorderFocused,
+            focusedTextColor = formColors.gridCellText,
+            unfocusedTextColor = formColors.gridCellText,
+            disabledTextColor = formColors.gridCellText.copy(alpha = 0.6f),
+            focusedPlaceholderColor = formColors.gridCellPlaceholder,
+            unfocusedPlaceholderColor = formColors.gridCellPlaceholder,
+            disabledPlaceholderColor = formColors.gridCellPlaceholder.copy(alpha = 0.7f),
+            focusedLabelColor = formColors.gridHeaderText,
+            unfocusedLabelColor = formColors.gridHeaderText,
+            disabledLabelColor = formColors.gridHeaderText.copy(alpha = 0.7f),
+            errorLabelColor = formColors.gridBorderError
+        ),
+        modifier = modifier
+            .heightIn(min = 56.dp)
+    )
+}
+
+@Composable
+private fun StyledTextField(
+    labelText: String,
+    fieldState: TextFieldValue,
+    enabled: Boolean,
+    error: Boolean,
+    warning: Boolean,
+    keyboardType: KeyboardType,
+    onValueChanged: (TextFieldValue) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val formColors = LocalFormColors.current
+    val formDimensions = LocalFormDimensions.current
+    val warningColor = MaterialTheme.colorScheme.tertiary
+    val focusedBorder = when {
+        error -> formColors.gridBorderError
+        warning -> warningColor
+        else -> formColors.gridBorderFocused
+    }
+    val unfocusedBorder = when {
+        error -> formColors.gridBorderError
+        warning -> warningColor
+        else -> formColors.gridBorder
+    }
+
+    OutlinedTextField(
+        value = fieldState,
+        onValueChange = { newValue ->
+            if (!enabled) return@OutlinedTextField
+            onValueChanged(newValue)
+        },
+        enabled = enabled,
+        isError = error,
+        singleLine = true,
+        label = { if (labelText.isNotBlank()) Text(labelText) },
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        shape = RoundedCornerShape(formDimensions.fieldCornerRadius),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = formColors.gridCellBackground,
+            unfocusedContainerColor = formColors.gridCellBackground,
+            disabledContainerColor = formColors.gridCellBackground.copy(alpha = 0.6f),
+            focusedBorderColor = focusedBorder,
+            unfocusedBorderColor = unfocusedBorder,
+            errorBorderColor = formColors.gridBorderError,
+            cursorColor = formColors.gridBorderFocused,
+            focusedTextColor = formColors.gridCellText,
+            unfocusedTextColor = formColors.gridCellText,
+            disabledTextColor = formColors.gridCellText.copy(alpha = 0.6f),
+            focusedPlaceholderColor = formColors.gridCellPlaceholder,
+            unfocusedPlaceholderColor = formColors.gridCellPlaceholder,
+            disabledPlaceholderColor = formColors.gridCellPlaceholder.copy(alpha = 0.7f),
+            focusedLabelColor = formColors.gridHeaderText,
+            unfocusedLabelColor = formColors.gridHeaderText,
+            disabledLabelColor = formColors.gridHeaderText.copy(alpha = 0.7f),
+            errorLabelColor = formColors.gridBorderError
+        ),
+        modifier = modifier
+            .heightIn(min = 56.dp)
+    )
+}
+
+private fun sanitizeNumericInput(
+    value: String,
+    allowDecimal: Boolean,
+    allowNegative: Boolean
+): String {
+    if (value.isBlank()) return value
+    val result = StringBuilder()
+    var hasDecimal = false
+    var hasSign = false
+    value.forEachIndexed { index, char ->
+        when {
+            char.isDigit() -> result.append(char)
+            char == '-' && allowNegative && index == 0 && !hasSign -> {
+                result.append(char)
+                hasSign = true
+            }
+            char == '.' && allowDecimal && !hasDecimal -> {
+                result.append(char)
+                hasDecimal = true
+            }
+        }
+    }
+    return result.toString()
 }
 
 /**
@@ -650,6 +919,53 @@ fun DataElementAccordion(
 }
 
 @Composable
+private fun DataEntryGridHeader(
+    columnTitles: List<String>,
+    rowHeaderTitle: String? = null,
+    modifier: Modifier = Modifier
+) {
+    val formColors = LocalFormColors.current
+    val formTypography = LocalFormTypography.current
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(formColors.gridHeaderBackground)
+            .padding(vertical = 8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(GridRowHeaderWidth)
+                .padding(start = 12.dp, end = 8.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Text(
+                text = rowHeaderTitle.orEmpty(),
+                style = formTypography.gridHeader,
+                color = formColors.gridHeaderText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        columnTitles.forEach { title ->
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 6.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text(
+                    text = title,
+                    style = formTypography.gridHeader,
+                    color = formColors.gridHeaderText,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun GridRowCard(
     rowTitle: String,
@@ -691,8 +1007,7 @@ private fun GridRowCard(
                 ) {
                     columns.forEach { field ->
                         Column(
-                            modifier = Modifier
-                                .widthIn(min = 120.dp)
+                            modifier = Modifier.widthIn(min = 120.dp)
                         ) {
                             DataValueField(
                                 dataValue = field.dataValue,
@@ -707,6 +1022,107 @@ private fun GridRowCard(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DataEntryGridRow(
+    rowTitle: String,
+    cells: List<GridCellData>,
+    rowIndex: Int,
+    onValueChange: (String, DataValue) -> Unit,
+    viewModel: DataEntryViewModel,
+    enabled: Boolean
+) {
+    val formColors = LocalFormColors.current
+    val formDimensions = LocalFormDimensions.current
+    val formTypography = LocalFormTypography.current
+    val rowBackground = if (rowIndex % 2 == 0) formColors.gridCellAltBackground else Color.Transparent
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(rowBackground)
+            .padding(vertical = 6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(GridRowHeaderWidth)
+                .padding(start = 12.dp, end = 8.dp, top = 8.dp),
+            contentAlignment = Alignment.TopStart
+        ) {
+            Text(
+                text = rowTitle,
+                style = formTypography.gridRowHeader,
+                color = formColors.gridRowHeaderText,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        cells.forEach { cell ->
+            GridDataCell(
+                dataValue = cell.dataValue,
+                enabled = enabled,
+                onValueChange = onValueChange,
+                viewModel = viewModel,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 6.dp)
+                    .border(
+                        width = 1.dp,
+                        color = formColors.gridBorder.copy(alpha = 0.35f),
+                        shape = RoundedCornerShape(formDimensions.fieldCornerRadius)
+                    )
+                    .padding(2.dp)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun GridDataCell(
+    dataValue: DataValue?,
+    enabled: Boolean,
+    onValueChange: (String, DataValue) -> Unit,
+    viewModel: DataEntryViewModel,
+    modifier: Modifier = Modifier
+) {
+    val formColors = LocalFormColors.current
+    val formTypography = LocalFormTypography.current
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val coroutineScope = rememberCoroutineScope()
+    val focusModifier = Modifier
+        .bringIntoViewRequester(bringIntoViewRequester)
+        .onFocusChanged { state ->
+            if (state.isFocused) {
+                coroutineScope.launch {
+                    bringIntoViewRequester.bringIntoView()
+                }
+            }
+        }
+
+    Box(modifier = modifier) {
+        if (dataValue == null) {
+            Text(
+                text = "—",
+                style = formTypography.gridCell,
+                color = formColors.gridCellPlaceholder,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 14.dp)
+            )
+        } else {
+            DataValueField(
+                dataValue = dataValue,
+                onValueChange = { value -> onValueChange(value, dataValue) },
+                viewModel = viewModel,
+                enabled = enabled,
+                showLabel = false,
+                compact = true,
+                inputModifier = focusModifier
+            )
         }
     }
 }
@@ -855,6 +1271,54 @@ fun CategoryAccordionRecursive(
         }
     }
 
+    if (categories.size == 2) {
+        val first = categories[0]
+        val second = categories[1]
+        val (rowCategory, columnCategory) = if (first.second.size >= second.second.size) {
+            first to second
+        } else {
+            second to first
+        }
+        val columnCount = columnCategory.second.size
+        if (columnCount in 2..3 && rowCategory.second.size >= 2) {
+            val columnTitles = columnCategory.second.map { it.second }
+            val valuesByComboUid = values.associateBy { it.categoryOptionCombo }
+            val formDimensions = LocalFormDimensions.current
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(formDimensions.sectionCornerRadius)
+                    )
+                    .padding(8.dp)
+            ) {
+                DataEntryGridHeader(
+                    columnTitles = columnTitles,
+                    rowHeaderTitle = rowCategory.first
+                )
+                rowCategory.second.forEachIndexed { index, (rowUid, rowName) ->
+                    val cells = columnCategory.second.map { (colUid, colName) ->
+                        val comboUid = optionUidsToComboUid[optionOnlyPath(parentPath + rowUid + colUid)]
+                        val dataValue = comboUid?.let { valuesByComboUid[it] }
+                        GridCellData(columnTitle = colName, dataValue = dataValue)
+                    }
+                    DataEntryGridRow(
+                        rowTitle = rowName,
+                        cells = cells,
+                        rowIndex = index,
+                        onValueChange = onValueChange,
+                        viewModel = viewModel,
+                        enabled = true
+                    )
+                }
+            }
+            return
+        }
+    }
+
     if (restCategories.isEmpty()) {
         // LAST CATEGORY: If <= 3 options, render as a row; if > 3, render each as a nested accordion
         if (currentCategory.second.size <= 3) {
@@ -981,7 +1445,6 @@ fun EditEntryScreen(
     var showPostSaveDialog by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val focusManager = LocalFocusManager.current
     val listState = rememberLazyListState()
     val syncProgress = state.detailedSyncProgress
     val navigationProgress = state.navigationProgress
@@ -1481,6 +1944,8 @@ fun EditEntryScreen(
                                         }
                                         val totalElements = elementGroups.size
                                         val bringIntoViewRequester = remember { BringIntoViewRequester() }
+                                        val formDimensions = LocalFormDimensions.current
+                                        val formTypography = LocalFormTypography.current
 
                                         // Check if ALL data elements in this section have default category combinations
                                         val allElementsHaveDefaultCategories = elementGroups.values.all { dataValues ->
@@ -1497,9 +1962,9 @@ fun EditEntryScreen(
                                             colors = CardDefaults.cardColors(
                                                 containerColor = MaterialTheme.colorScheme.surface
                                             ),
-                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
                                             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                                            shape = RoundedCornerShape(14.dp)
+                                            shape = RoundedCornerShape(formDimensions.sectionCornerRadius)
                                         ) {
                                             // Section Header Accordion
                                             Row(
@@ -1523,22 +1988,51 @@ fun EditEntryScreen(
                                                     modifier = Modifier.weight(1f),
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Text(
-                                                        text = sectionName,
-                                                        style = MaterialTheme.typography.titleMedium,
-                                                        fontWeight = FontWeight.Bold,
-                                                        maxLines = 2,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        lineHeight = 20.sp,
-                                                        modifier = Modifier.weight(1f, fill = false)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        text = "($elementsWithData/$totalElements elements)",
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                                        maxLines = 1
-                                                    )
+                                                    Column(modifier = Modifier.weight(1f, fill = false)) {
+                                                        Text(
+                                                            text = sectionName,
+                                                            style = formTypography.sectionTitle,
+                                                            fontWeight = FontWeight.Bold,
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            lineHeight = 20.sp
+                                                        )
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                        ) {
+                                                            val isComplete = totalElements > 0 && elementsWithData == totalElements
+                                                            val statusText = if (isComplete) "Complete" else "In progress"
+                                                            val statusBg = if (isComplete) {
+                                                                MaterialTheme.colorScheme.primaryContainer
+                                                            } else {
+                                                                MaterialTheme.colorScheme.surfaceVariant
+                                                            }
+                                                            val statusColor = if (isComplete) {
+                                                                MaterialTheme.colorScheme.onPrimaryContainer
+                                                            } else {
+                                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                                            }
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .background(statusBg, RoundedCornerShape(10.dp))
+                                                                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = statusText,
+                                                                    style = MaterialTheme.typography.labelSmall,
+                                                                    color = statusColor
+                                                                )
+                                                            }
+                                                            Text(
+                                                                text = "$elementsWithData/$totalElements elements",
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                                                maxLines = 1
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                                 Icon(
                                                     imageVector = Icons.Default.KeyboardArrowDown,

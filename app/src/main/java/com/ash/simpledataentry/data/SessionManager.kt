@@ -1041,7 +1041,11 @@ class SessionManager @Inject constructor(
         }
 
         val categoryOptionCombosDeferred = async {
-            d2Instance.categoryModule().categoryOptionCombos().blockingGet().map {
+            d2Instance.categoryModule()
+                .categoryOptionCombos()
+                .withCategoryOptions()
+                .blockingGet()
+                .map {
                 com.ash.simpledataentry.data.local.CategoryOptionComboEntity(
                     id = it.uid(),
                     name = it.displayName() ?: it.uid(),
