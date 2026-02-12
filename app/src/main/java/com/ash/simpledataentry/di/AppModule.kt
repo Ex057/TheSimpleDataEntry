@@ -282,11 +282,13 @@ object AppModule {
     @Singleton
     fun provideMetadataCacheService(
         sessionManager: SessionManager,
-        databaseProvider: DatabaseProvider
+        databaseProvider: DatabaseProvider,
+        @ApplicationContext context: Context
     ): MetadataCacheService {
         return MetadataCacheService(
             sessionManager,
-            databaseProvider
+            databaseProvider,
+            context
         )
     }
 

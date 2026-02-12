@@ -127,8 +127,6 @@ class DatasetsViewModel @Inject constructor(
 
         // Initial load (may use fallback database if session not yet restored)
         loadPrograms()
-        // Start background prefetching after programs are loaded
-        backgroundDataPrefetcher.startPrefetching(topDatasetCount = 3)
 
         // REMOVED: Background sync progress observer
         // Background sync after login should NOT block the UI with an overlay

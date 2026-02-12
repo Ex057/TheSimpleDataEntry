@@ -29,6 +29,7 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
     // Lazy DAO accessors - always get from current account's database
     private val trackerEnrollmentDao get() = databaseProvider.getCurrentDatabase().trackerEnrollmentDao()
     private val eventInstanceDao get() = databaseProvider.getCurrentDatabase().eventInstanceDao()
+    private val dataValueDao get() = databaseProvider.getCurrentDatabase().dataValueDao()
 
     override suspend fun getDatasetInstances(datasetId: String): List<DatasetInstance> {
         Log.d(TAG, "Fetching dataset instances for dataset: $datasetId")
@@ -218,6 +219,10 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
         return withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Getting instance count for dataset: $datasetId")
+                if (!databaseProvider.isAccountDatabaseActive()) {
+                    Log.w(TAG, "Account database not active - returning 0 for dataset count")
+                    return@withContext 0
+                }
 
                 // Get scoped org units
                 val scopedOrgUnits = d2.organisationUnitModule().organisationUnits()
@@ -245,15 +250,29 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                     return@withContext 0
                 }
 
-                // Count dataset instances across all relevant org units
-                val count = d2.dataSetModule()
-                    .dataSetInstances()
-                    .byDataSetUid().eq(datasetId)
-                    .byOrganisationUnitUid().`in`(relevantOrgUnitIds.toList())
-                    .blockingCount()
+                // Count dataset instances across all relevant org units (SDK)
+                try {
+                    val count = d2.dataSetModule()
+                        .dataSetInstances()
+                        .byDataSetUid().eq(datasetId)
+                        .byOrganisationUnitUid().`in`(relevantOrgUnitIds.toList())
+                        .blockingCount()
 
-                Log.d(TAG, "Found $count instances for dataset $datasetId")
-                count
+                    Log.d(TAG, "Found $count instances for dataset $datasetId")
+                    count
+                } catch (e: Exception) {
+                    Log.w(TAG, "SDK count failed, falling back to Room count", e)
+                    val roomCount = if (relevantOrgUnitIds.isEmpty()) {
+                        dataValueDao.countDistinctInstancesIncludingDrafts(datasetId)
+                    } else {
+                        dataValueDao.countDistinctInstancesIncludingDraftsForOrgUnits(
+                            datasetId,
+                            relevantOrgUnitIds.toList()
+                        )
+                    }
+                    Log.d(TAG, "Room fallback count=$roomCount for dataset $datasetId")
+                    roomCount
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to get instance count for dataset $datasetId", e)
                 0

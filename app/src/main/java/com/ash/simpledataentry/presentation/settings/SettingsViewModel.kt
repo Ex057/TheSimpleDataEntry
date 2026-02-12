@@ -1,6 +1,7 @@
 package com.ash.simpledataentry.presentation.settings
 
 import androidx.lifecycle.ViewModel
+import android.content.Context
 import androidx.lifecycle.viewModelScope
 import com.ash.simpledataentry.data.repositoryImpl.SavedAccountRepository
 import com.ash.simpledataentry.data.security.AccountEncryption
@@ -32,6 +33,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import javax.inject.Inject
+import dagger.hilt.android.qualifiers.ApplicationContext
 
 /**
  * Settings data model - contains only data, no UI state flags
@@ -42,6 +44,8 @@ data class SettingsData(
     val syncFrequency: SyncFrequency = SyncFrequency.DAILY,
     val isMetadataSyncing: Boolean = false,
     val metadataSyncMessage: String? = null,
+    val isFullSyncing: Boolean = false,
+    val fullSyncMessage: String? = null,
     val isExporting: Boolean = false,
     val exportProgress: Float = 0f,
     val isDeleting: Boolean = false,
@@ -68,7 +72,8 @@ class SettingsViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val backgroundSyncManager: BackgroundSyncManager,
     private val databaseProvider: DatabaseProvider,
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
     // New UiState pattern
@@ -146,6 +151,28 @@ class SettingsViewModel @Inject constructor(
                         metadataSyncMessage = "Metadata sync started"
                     )
                 )
+            } catch (e: Exception) {
+                val uiError = e.toUiError()
+                _uiState.emitError(uiError)
+            }
+        }
+    }
+
+    fun downloadFullDataNow() {
+        viewModelScope.launch {
+            try {
+                val currentData = getCurrentData()
+                _uiState.emitSuccess(
+                    currentData.copy(isFullSyncing = true, fullSyncMessage = null)
+                )
+
+                sessionManager.startBackgroundDataSync(appContext) { success, message ->
+                    val updated = getCurrentData().copy(
+                        isFullSyncing = false,
+                        fullSyncMessage = if (success) "Full data sync complete" else message ?: "Full data sync failed"
+                    )
+                    _uiState.emitSuccess(updated)
+                }
             } catch (e: Exception) {
                 val uiError = e.toUiError()
                 _uiState.emitError(uiError)

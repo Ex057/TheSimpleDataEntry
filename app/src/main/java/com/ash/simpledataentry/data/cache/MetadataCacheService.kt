@@ -1,5 +1,6 @@
 package com.ash.simpledataentry.data.cache
 
+import android.content.Context
 import android.util.Log
 import com.ash.simpledataentry.data.DatabaseProvider
 import com.ash.simpledataentry.data.SessionManager
@@ -10,6 +11,8 @@ import kotlinx.coroutines.withContext
 import org.hisp.dhis.android.core.D2
 import javax.inject.Inject
 import javax.inject.Singleton
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Service for caching and optimizing metadata access across feature stacks.
@@ -21,7 +24,8 @@ import javax.inject.Singleton
 @Singleton
 class MetadataCacheService @Inject constructor(
     private val sessionManager: SessionManager,
-    private val databaseProvider: DatabaseProvider
+    private val databaseProvider: DatabaseProvider,
+    private val context: Context
 ) {
     // Dynamic DAO accessors - always get from current database
     private val dataElementDao: DataElementDao get() = databaseProvider.getCurrentDatabase().dataElementDao()
@@ -55,6 +59,57 @@ class MetadataCacheService @Inject constructor(
         val name: String,
         val dataElementUids: List<String>
     )
+
+    private val prefs by lazy {
+        context.getSharedPreferences("metadata_cache", Context.MODE_PRIVATE)
+    }
+
+    private fun sectionsCacheKey(datasetId: String) = "sections_$datasetId"
+
+    private fun loadSectionsFromDisk(datasetId: String): List<SectionInfo>? {
+        val raw = prefs.getString(sectionsCacheKey(datasetId), null) ?: return null
+        return try {
+            val json = JSONArray(raw)
+            buildList {
+                for (i in 0 until json.length()) {
+                    val item = json.getJSONObject(i)
+                    val name = item.optString("name")
+                    val uids = item.optJSONArray("uids")
+                    val list = buildList {
+                        if (uids != null) {
+                            for (j in 0 until uids.length()) {
+                                add(uids.getString(j))
+                            }
+                        }
+                    }
+                    if (name.isNotBlank() && list.isNotEmpty()) {
+                        add(SectionInfo(name, list))
+                    }
+                }
+            }.takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            Log.w("MetadataCacheService", "Failed to parse cached sections for $datasetId", e)
+            null
+        }
+    }
+
+    private fun persistSectionsToDisk(datasetId: String, sections: List<SectionInfo>) {
+        if (sections.isEmpty()) return
+        try {
+            val json = JSONArray()
+            sections.forEach { section ->
+                val obj = JSONObject()
+                obj.put("name", section.name)
+                val uids = JSONArray()
+                section.dataElementUids.forEach { uids.put(it) }
+                obj.put("uids", uids)
+                json.put(obj)
+            }
+            prefs.edit().putString(sectionsCacheKey(datasetId), json.toString()).apply()
+        } catch (e: Exception) {
+            Log.w("MetadataCacheService", "Failed to persist sections for $datasetId", e)
+        }
+    }
     
     /**
      * Get optimized data for EditEntryScreen with pre-fetched and pre-mapped data values
@@ -176,20 +231,27 @@ class MetadataCacheService @Inject constructor(
 
         val resolvedAttr = if (attributeOptionCombo.isBlank()) defaultCombo else attributeOptionCombo
 
-        val rawSdkDataValues = d2.dataValueModule().dataValues()
+        fun fetchValues(attr: String) = d2.dataValueModule().dataValues()
             .byDataSetUid(datasetId)
             .byPeriod().eq(period)
             .byOrganisationUnitUid().eq(orgUnit)
-            .byAttributeOptionComboUid().eq(resolvedAttr)
+            .byAttributeOptionComboUid().eq(attr)
             .blockingGet()
 
+        var rawSdkDataValues = fetchValues(resolvedAttr)
+
+        if (rawSdkDataValues.isEmpty()) {
+            Log.w("MetadataCacheService", "No data values in local cache for dataset=$datasetId. Triggering aggregate download...")
+            try {
+                d2.aggregatedModule().data().blockingDownload()
+                rawSdkDataValues = fetchValues(resolvedAttr)
+            } catch (e: Exception) {
+                Log.w("MetadataCacheService", "Aggregate download failed while refreshing data values", e)
+            }
+        }
+
         if (rawSdkDataValues.isEmpty() && resolvedAttr != defaultCombo && defaultCombo.isNotBlank()) {
-            val fallbackValues = d2.dataValueModule().dataValues()
-                .byDataSetUid(datasetId)
-                .byPeriod().eq(period)
-                .byOrganisationUnitUid().eq(orgUnit)
-                .byAttributeOptionComboUid().eq(defaultCombo)
-                .blockingGet()
+            val fallbackValues = fetchValues(defaultCombo)
             storeDataValuesInRoom(datasetId, period, orgUnit, defaultCombo, fallbackValues)
             fallbackValues.size
         } else {
@@ -202,6 +264,12 @@ class MetadataCacheService @Inject constructor(
      * Get sections for a dataset with caching
      */
     private suspend fun getSectionsForDataset(datasetId: String): List<SectionInfo> {
+        sectionsCache[datasetId]?.let { return it }
+        loadSectionsFromDisk(datasetId)?.let { cached ->
+            sectionsCache[datasetId] = cached
+            return cached
+        }
+
         return sectionsCache.getOrPut(datasetId) {
             val sections = d2.dataSetModule().sections()
                 .withDataElements()
@@ -234,12 +302,14 @@ class MetadataCacheService @Inject constructor(
                     )
                 }
             } else {
-                sections.map { section ->
+                val mapped = sections.map { section ->
                     SectionInfo(
                         name = section.displayName() ?: "Unassigned",
                         dataElementUids = section.dataElements()?.map { it.uid() } ?: emptyList()
                     )
                 }
+                persistSectionsToDisk(datasetId, mapped)
+                mapped
             }
         }
     }
@@ -455,6 +525,7 @@ class MetadataCacheService @Inject constructor(
         categoryOptionCombosCache.clear()
         groupingStrategyCache.clear()
         impliedCategoryCache.clear()
+        prefs.edit().clear().apply()
         Log.d("MetadataCacheService", "All metadata caches cleared")
     }
     

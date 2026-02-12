@@ -85,7 +85,29 @@ fun SettingsScreen(
                             }
                             Text("Sync metadata now")
                         }
+                        Button(
+                            onClick = { viewModel.downloadFullDataNow() },
+                            enabled = !state.isFullSyncing,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (state.isFullSyncing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            Text("Download full data")
+                        }
                         state.metadataSyncMessage?.let { message ->
+                            Text(
+                                text = message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        state.fullSyncMessage?.let { message ->
                             Text(
                                 text = message,
                                 style = MaterialTheme.typography.bodySmall,

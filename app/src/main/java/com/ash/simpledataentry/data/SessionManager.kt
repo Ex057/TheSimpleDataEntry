@@ -59,6 +59,11 @@ data class MetadataDownloadResult(
     val canProceed: Boolean get() = !hasCriticalFailures
 }
 
+enum class RoomHydrationMode {
+    MINIMAL,
+    FULL
+}
+
 @Singleton
 class SessionManager @Inject constructor(
     private val accountManager: AccountManager,
@@ -211,8 +216,7 @@ class SessionManager @Inject constructor(
 
             // Use resilient metadata download that handles JSON errors gracefully
             downloadMetadataResilient { _ -> /* No progress UI in simple login */ }
-            downloadAggregateData()
-            hydrateRoomFromSdk(context, accountDb)
+            hydrateRoomFromSdk(context, accountDb, RoomHydrationMode.MINIMAL)
 
             Log.i("SessionManager", "Login successful for ${dhis2Config.username}")
         } catch (e: Exception) {
@@ -231,6 +235,7 @@ class SessionManager @Inject constructor(
     ) = withContext(Dispatchers.IO) {
         try {
             Log.d("SessionManager", "Starting background data sync...")
+            val syncStart = System.currentTimeMillis()
 
             // Get current account's database
             val activeAccountId = accountManager.getActiveAccountId(context)
@@ -248,10 +253,11 @@ class SessionManager @Inject constructor(
             Log.d("SessionManager", "Background: Tracker data downloaded")
 
             // Hydrate Room database
-            hydrateRoomFromSdk(context, accountDb)
+            hydrateRoomFromSdk(context, accountDb, RoomHydrationMode.FULL)
             Log.d("SessionManager", "Background: Room database hydrated")
 
             Log.i("SessionManager", "Background data sync completed successfully")
+            Log.d("SessionManager", "Background data sync duration: ${System.currentTimeMillis() - syncStart}ms")
             onComplete?.invoke(true, "Data sync complete")
 
         } catch (e: Exception) {
@@ -412,6 +418,17 @@ class SessionManager @Inject constructor(
                     Log.w("SessionManager", "Non-critical metadata '${failure.type}' failed but continuing: ${failure.error}")
                 }
             }
+
+            onProgress(NavigationProgress(
+                phase = LoadingPhase.DOWNLOADING_METADATA,
+                overallPercentage = 78,
+                phaseTitle = "Preparing forms",
+                phaseDetail = "Hydrating essential metadata..."
+            ))
+
+            val hydrateStart = System.currentTimeMillis()
+            hydrateRoomFromSdk(context, accountDb, RoomHydrationMode.MINIMAL)
+            Log.d("SessionManager", "Minimal Room hydration completed in ${System.currentTimeMillis() - hydrateStart}ms")
 
             // Now that metadata is available, mark account as active
             accountManager.setActiveAccountId(context, accountInfo.accountId)
@@ -761,7 +778,7 @@ class SessionManager @Inject constructor(
                 Log.d("SessionManager", "Offline account restored, notifying observers: ${accountInfo.accountId}")
 
                 // Hydrate Room database from existing SDK data
-                hydrateRoomFromSdk(context, accountDb)
+                hydrateRoomFromSdk(context, accountDb, RoomHydrationMode.MINIMAL)
 
                 Log.i("SessionManager", "SECURE offline login successful for ${dhis2Config.username}")
                 true
@@ -868,9 +885,11 @@ class SessionManager @Inject constructor(
         var lastError: String? = null
         val maxRetries = 3
         val progressTimeoutSeconds = 60L
+        val overallStart = System.currentTimeMillis()
 
         for (attempt in 1..maxRetries) {
             Log.d("SessionManager", "Metadata download attempt $attempt of $maxRetries")
+            val attemptStart = System.currentTimeMillis()
 
             onProgress(NavigationProgress(
                 phase = LoadingPhase.DOWNLOADING_METADATA,
@@ -951,7 +970,10 @@ class SessionManager @Inject constructor(
             val hasAnyData = hasOrgUnits || hasPrograms || hasDatasets
 
             if (hasAnyData) {
-                Log.d("SessionManager", "✓ Metadata download successful on attempt $attempt")
+                Log.d(
+                    "SessionManager",
+                    "✓ Metadata download successful on attempt $attempt in ${System.currentTimeMillis() - attemptStart}ms (total ${System.currentTimeMillis() - overallStart}ms)"
+                )
                 return@withContext MetadataDownloadResult(
                     successful = 1,
                     failed = 0,
@@ -996,12 +1018,17 @@ class SessionManager @Inject constructor(
         }
     }
 
-    suspend fun hydrateRoomFromSdk(context: Context, db: AppDatabase) = withContext(Dispatchers.IO) {
+    suspend fun hydrateRoomFromSdk(
+        context: Context,
+        db: AppDatabase,
+        mode: RoomHydrationMode = RoomHydrationMode.FULL
+    ) = withContext(Dispatchers.IO) {
         val d2Instance = d2 ?: return@withContext
 
         // Note: Cache validation no longer needed - DatabaseProvider ensures account isolation
 
         val startTime = System.currentTimeMillis()
+        Log.d("SessionManager", "Hydrating Room from SDK (mode=$mode)")
 
         // PERFORMANCE OPTIMIZATION: Fetch all metadata in parallel using async
         val datasetsDeferred = async {
@@ -1065,7 +1092,7 @@ class SessionManager @Inject constructor(
             }
         }
 
-        // PHASE 2 FIX: Add tracker and event program hydration
+        // Tracker & event program hydration (keep for MINIMAL to render program lists)
         val trackerProgramsDeferred = async {
             d2Instance.programModule().programs()
                 .byProgramType().eq(org.hisp.dhis.android.core.program.ProgramType.WITH_REGISTRATION)
@@ -1109,8 +1136,9 @@ class SessionManager @Inject constructor(
                 }
         }
 
-        // PHASE 2 FIX: Add tracker enrollment and event instance hydration
+        // Tracker enrollment and event instance hydration (FULL only)
         val trackerEnrollmentsDeferred = async {
+            if (mode != RoomHydrationMode.FULL) return@async emptyList()
             val orgUnitMap = d2Instance.organisationUnitModule().organisationUnits()
                 .blockingGet()
                 .associateBy({ it.uid() }, { it.displayName() ?: it.name() ?: "Unknown" })
@@ -1135,6 +1163,7 @@ class SessionManager @Inject constructor(
         }
 
         val eventInstancesDeferred = async {
+            if (mode != RoomHydrationMode.FULL) return@async emptyList()
             val orgUnitMap = d2Instance.organisationUnitModule().organisationUnits()
                 .blockingGet()
                 .associateBy({ it.uid() }, { it.displayName() ?: it.name() ?: "Unknown" })
@@ -1170,6 +1199,7 @@ class SessionManager @Inject constructor(
         val eventInstances = eventInstancesDeferred.await()
 
         val fetchTime = System.currentTimeMillis() - startTime
+        Log.d("SessionManager", "Metadata fetch from SDK completed in ${fetchTime}ms (mode=$mode)")
 
         // Insert all data sequentially (Room doesn't handle parallel writes well)
         // CRITICAL: Log what SDK returns to diagnose empty Room issues
@@ -1213,7 +1243,7 @@ class SessionManager @Inject constructor(
             Log.w("SessionManager", "SDK returned 0 orgUnits - preserving existing Room data")
         }
 
-        // PHASE 2 FIX: Insert tracker and event programs into Room
+        // Insert tracker and event programs into Room
         db.trackerProgramDao().clearAll()
         db.trackerProgramDao().insertAll(trackerPrograms)
         Log.d("SessionManager", "Hydrated ${trackerPrograms.size} tracker programs")
@@ -1222,63 +1252,63 @@ class SessionManager @Inject constructor(
         db.eventProgramDao().insertAll(eventPrograms)
         Log.d("SessionManager", "Hydrated ${eventPrograms.size} event programs")
 
-        // PHASE 2 FIX: Insert tracker enrollments and event instances into Room
-        db.trackerEnrollmentDao().clearAll()
-        db.trackerEnrollmentDao().insertAll(trackerEnrollments)
-        Log.d("SessionManager", "Hydrated ${trackerEnrollments.size} tracker enrollments")
+        if (mode == RoomHydrationMode.FULL) {
+            db.trackerEnrollmentDao().clearAll()
+            db.trackerEnrollmentDao().insertAll(trackerEnrollments)
+            Log.d("SessionManager", "Hydrated ${trackerEnrollments.size} tracker enrollments")
 
-        db.eventInstanceDao().clearAll()
-        db.eventInstanceDao().insertAll(eventInstances)
-        Log.d("SessionManager", "Hydrated ${eventInstances.size} event instances")
+            db.eventInstanceDao().clearAll()
+            db.eventInstanceDao().insertAll(eventInstances)
+            Log.d("SessionManager", "Hydrated ${eventInstances.size} event instances")
+        }
 
         val totalTime = System.currentTimeMillis() - startTime
+        Log.d("SessionManager", "Room hydration completed in ${totalTime}ms (mode=$mode)")
 
 
-        // Hydrate data values from DHIS2 SDK to Room database
-        Log.d("SessionManager", "Loading data values from DHIS2 SDK...")
-        try {
-            // First, create a mapping of data element UIDs to dataset UIDs
-            val dataElementToDatasetMap = mutableMapOf<String, String>()
-            d2Instance.dataSetModule().dataSets().blockingGet().forEach { dataset ->
-                dataset.dataSetElements()?.forEach { dataSetElement ->
-                    dataElementToDatasetMap[dataSetElement.dataElement().uid()] = dataset.uid()
+        if (mode == RoomHydrationMode.FULL) {
+            Log.d("SessionManager", "Loading data values from DHIS2 SDK...")
+            try {
+                val dataElementToDatasetMap = mutableMapOf<String, String>()
+                d2Instance.dataSetModule().dataSets().blockingGet().forEach { dataset ->
+                    dataset.dataSetElements()?.forEach { dataSetElement ->
+                        dataElementToDatasetMap[dataSetElement.dataElement().uid()] = dataset.uid()
+                    }
                 }
+                Log.d("SessionManager", "Created mapping for ${dataElementToDatasetMap.size} data elements to datasets")
+
+                val regularDataValues = d2Instance.dataValueModule().dataValues().blockingGet()
+                Log.d("SessionManager", "Using regular data values (${regularDataValues.size})")
+
+                val dataValues = regularDataValues.map { dataValue ->
+                    val dataElementUid = dataValue.dataElement() ?: ""
+                    val datasetId = dataElementToDatasetMap[dataElementUid] ?: ""
+                    val period = dataValue.period() ?: ""
+                    val orgUnit = dataValue.organisationUnit() ?: ""
+                    val attributeOptionCombo = dataValue.attributeOptionCombo() ?: ""
+                    val categoryOptionCombo = dataValue.categoryOptionCombo() ?: ""
+                    val value = dataValue.value()
+
+                    com.ash.simpledataentry.data.local.DataValueEntity(
+                        datasetId = datasetId,
+                        period = period,
+                        orgUnit = orgUnit,
+                        attributeOptionCombo = attributeOptionCombo,
+                        dataElement = dataElementUid,
+                        categoryOptionCombo = categoryOptionCombo,
+                        value = value,
+                        comment = dataValue.comment(),
+                        lastModified = dataValue.lastUpdated()?.time ?: System.currentTimeMillis()
+                    )
+                }
+                db.dataValueDao().deleteAllDataValues()
+                db.dataValueDao().insertAll(dataValues)
+                Log.d("SessionManager", "Loaded ${dataValues.size} data values into Room database")
+            } catch (e: Exception) {
+                Log.e("SessionManager", "Failed to load data values: ${e.message}", e)
             }
-            Log.d("SessionManager", "Created mapping for ${dataElementToDatasetMap.size} data elements to datasets")
-
-            // Use regular data values for now until we understand the aggregated module interface
-            val regularDataValues = d2Instance.dataValueModule().dataValues().blockingGet()
-            Log.d("SessionManager", "Using regular data values (${regularDataValues.size})")
-
-            val dataValuesToUse = regularDataValues
-
-            val dataValues = dataValuesToUse.mapIndexed { index, dataValue ->
-                val dataElementUid = dataValue.dataElement() ?: ""
-                val datasetId = dataElementToDatasetMap[dataElementUid] ?: ""
-                val period = dataValue.period() ?: ""
-                val orgUnit = dataValue.organisationUnit() ?: ""
-                val attributeOptionCombo = dataValue.attributeOptionCombo() ?: ""
-                val categoryOptionCombo = dataValue.categoryOptionCombo() ?: ""
-                val value = dataValue.value()
-
-
-                com.ash.simpledataentry.data.local.DataValueEntity(
-                    datasetId = datasetId,
-                    period = period,
-                    orgUnit = orgUnit,
-                    attributeOptionCombo = attributeOptionCombo,
-                    dataElement = dataElementUid,
-                    categoryOptionCombo = categoryOptionCombo,
-                    value = value,
-                    comment = dataValue.comment(),
-                    lastModified = dataValue.lastUpdated()?.time ?: System.currentTimeMillis()
-                )
-            }
-            db.dataValueDao().deleteAllDataValues()
-            db.dataValueDao().insertAll(dataValues)
-            Log.d("SessionManager", "Loaded ${dataValues.size} data values into Room database")
-        } catch (e: Exception) {
-            Log.e("SessionManager", "Failed to load data values: ${e.message}", e)
+        } else {
+            Log.d("SessionManager", "Skipping data value hydration for minimal mode")
         }
     }
 
@@ -1381,7 +1411,7 @@ class SessionManager @Inject constructor(
                     if (!hasFullMetadata) {
                         Log.w("SessionManager", "Room database is empty - triggering re-hydration from SDK cache")
                         try {
-                            hydrateRoomFromSdk(context, db)
+                            hydrateRoomFromSdk(context, db, RoomHydrationMode.MINIMAL)
                             Log.d("SessionManager", "Room re-hydration completed successfully")
                         } catch (e: Exception) {
                             Log.e("SessionManager", "Failed to re-hydrate Room: ${e.message}")

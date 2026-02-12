@@ -278,13 +278,19 @@ class DataEntryRepositoryImpl @Inject constructor(
                 )
             }
         }
+        val combosByComboId = optimizedData.categoryOptionCombos.values
+            .groupBy { it.categoryComboId }
+            .toMutableMap()
+        comboOverrides.forEach { (comboId, overrides) ->
+            combosByComboId[comboId] = overrides
+        }
+
         val loggedComboIds = mutableSetOf<String>()
         val mappedDataValues = optimizedData.sections.flatMap { section ->
             val sectionResults = section.dataElementUids.flatMap { deUid ->
                 val dataElement = optimizedData.dataElements[deUid]
                 val comboId = dataElement?.categoryComboId ?: ""
-                val combos = comboOverrides[comboId]
-                    ?: optimizedData.categoryOptionCombos.values.filter { it.categoryComboId == comboId }
+                val combos = combosByComboId[comboId].orEmpty()
 
                 if (deUid == "mZeRxcTNykN") {
                     Log.d(

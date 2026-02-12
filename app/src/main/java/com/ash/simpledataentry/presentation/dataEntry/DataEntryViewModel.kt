@@ -315,11 +315,14 @@ class DataEntryViewModel @Inject constructor(
                         )
                     }
 
-                    val uniqueCategoryCombos = values
-                        .mapNotNull { it.categoryOptionCombo }
-                        .filter { it.isNotBlank() }
-                        .distinct()
-                        .toSet()
+                    val uniqueCategoryCombos = LinkedHashSet<String>().apply {
+                        values.forEach { value ->
+                            val combo = value.categoryOptionCombo
+                            if (!combo.isNullOrBlank()) {
+                                add(combo)
+                            }
+                        }
+                    }
 
                     val categoryComboStructures = mutableMapOf<String, List<Pair<String, List<Pair<String, String>>>>>()
                     val optionUidsToComboUid = mutableMapOf<String, Map<Set<String>, String>>()
