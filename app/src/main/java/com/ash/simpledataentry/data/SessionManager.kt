@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.ash.simpledataentry.domain.model.Dhis2Config
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
@@ -223,6 +224,43 @@ class SessionManager @Inject constructor(
             Log.e("SessionManager", "Login failed", e)
             throw e
         }
+    }
+
+    /**
+     * Authenticate and bind account/database without blocking on metadata/data bootstrap.
+     * Intended for foreground-worker based bootstrap flows.
+     */
+    suspend fun authenticateOnly(context: Context, dhis2Config: Dhis2Config) = withContext(Dispatchers.IO) {
+        val accountInfo = accountManager.getOrCreateAccount(context, dhis2Config.username, dhis2Config.serverUrl)
+        databaseManager.getDatabaseForAccount(context, accountInfo)
+
+        if (d2 == null) {
+            initD2(context)
+        }
+
+        if (d2?.userModule()?.isLogged()?.blockingGet() == true) {
+            runCatching { d2?.userModule()?.blockingLogOut() }
+        }
+
+        d2?.userModule()?.blockingLogIn(
+            dhis2Config.username,
+            dhis2Config.password,
+            dhis2Config.serverUrl
+        ) ?: throw IllegalStateException("D2 not initialized")
+
+        accountManager.setActiveAccountId(context, accountInfo.accountId)
+        _currentAccountId.value = accountInfo.accountId
+
+        val passwordHash = hashPassword(dhis2Config.password, dhis2Config.username + dhis2Config.serverUrl)
+        val prefs = context.getSharedPreferences("session_prefs", Context.MODE_PRIVATE)
+        prefs.edit {
+            putString("username", dhis2Config.username)
+            putString("serverUrl", dhis2Config.serverUrl)
+            putString("password_hash", passwordHash)
+            putLong("hash_created", System.currentTimeMillis())
+        }
+
+        Log.i("SessionManager", "Authentication successful (bootstrap deferred) for ${dhis2Config.username}")
     }
 
     /**
@@ -479,19 +517,15 @@ class SessionManager @Inject constructor(
                 phaseDetail = "Welcome! Data is syncing in background..."
             ))
 
-            // CRITICAL CHANGE: Data downloads moved to async background task
-            // UI is now unlocked, user can start working immediately
-            // Background sync will show notification when complete
-            Log.d("SessionManager", "Metadata sync complete - triggering background data sync...")
-            try {
-                val workName = backgroundSyncManager.triggerImmediateSync()
-                Log.d("SessionManager", "Background data sync triggered: $workName")
-            } catch (syncError: Exception) {
-                // Log but don't fail login - data sync can be retried later
-                Log.w("SessionManager", "Failed to trigger background sync: ${syncError.message}", syncError)
-            }
+            // Keep login deterministic: do not start full data sync in background here.
+            // Full data sync remains user-triggered from Settings.
+            Log.d("SessionManager", "Metadata sync complete - background full sync is deferred")
 
         } catch (e: Exception) {
+            if (e is CancellationException) {
+                Log.w("SessionManager", "loginWithProgress cancelled")
+                throw e
+            }
             // Extract D2Error for detailed diagnostics and user-friendly messages
             val d2Error = extractD2Error(e)
             val errorCode = d2Error?.errorCode()
@@ -515,11 +549,32 @@ class SessionManager @Inject constructor(
                 else -> d2Error?.errorDescription() ?: e.message ?: "Login failed"
             }
 
-            Log.e("SessionManager", "Enhanced login failed: errorCode=$errorCode, description=${d2Error?.errorDescription()}", e)
+            if (errorCode == D2ErrorCode.BAD_CREDENTIALS) {
+                Log.w("SessionManager", "Enhanced login failed: BAD_CREDENTIALS")
+            } else {
+                Log.e(
+                    "SessionManager",
+                    "Enhanced login failed: errorCode=$errorCode, description=${d2Error?.errorDescription()}",
+                    e
+                )
+            }
             onProgress(NavigationProgress.error(userMessage))
-            secureLogout(context)
-            accountManager.clearActiveAccountId(context)
-            _currentAccountId.value = null
+
+            // IMPORTANT: Do not clear secure saved-login material on ordinary login failures.
+            // Otherwise users lose offline capability and it looks like saved logins disappeared.
+            if (errorCode != D2ErrorCode.BAD_CREDENTIALS) {
+                try {
+                    d2?.userModule()?.blockingLogOut()
+                } catch (logoutError: Exception) {
+                    Log.w("SessionManager", "Best-effort logout after failed login: ${logoutError.message}")
+                }
+            }
+
+            // Only clear active account binding for hard session conflicts.
+            if (errorCode == D2ErrorCode.ALREADY_AUTHENTICATED) {
+                accountManager.clearActiveAccountId(context)
+                _currentAccountId.value = null
+            }
 
             val mappedException = when (errorCode) {
                 D2ErrorCode.SERVER_CONNECTION_ERROR,
@@ -830,10 +885,44 @@ class SessionManager @Inject constructor(
     }
 
     fun logout() {
+        // Backward-compatible logout entrypoint for callers without Context.
+        // Keep local runtime clean to prevent stale in-app session state.
         try {
             d2?.userModule()?.blockingLogOut()
         } catch (e: Exception) {
             Log.e("SessionManager", "Logout error: ${e.message}", e)
+        } finally {
+            _currentAccountId.value = null
+            d2 = null
+            Log.d("SessionManager", "Logout complete (runtime session cleared)")
+        }
+    }
+
+    fun logout(context: Context) {
+        try {
+            d2?.userModule()?.blockingLogOut()
+        } catch (e: Exception) {
+            Log.e("SessionManager", "Logout error: ${e.message}", e)
+        } finally {
+            runCatching {
+                accountManager.clearActiveAccountId(context)
+            }.onFailure {
+                Log.w("SessionManager", "Failed to clear active account binding: ${it.message}")
+            }
+
+            val prefs = context.getSharedPreferences("session_prefs", Context.MODE_PRIVATE)
+            prefs.edit {
+                remove("username")
+                remove("serverUrl")
+                remove("password_hash")
+                remove("hash_created")
+                remove("last_validated")
+                putBoolean("offline_mode", false)
+            }
+
+            _currentAccountId.value = null
+            d2 = null
+            Log.d("SessionManager", "Logout complete (active account + session state cleared)")
         }
     }
 
@@ -884,7 +973,8 @@ class SessionManager @Inject constructor(
 
         var lastError: String? = null
         val maxRetries = 3
-        val progressTimeoutSeconds = 60L
+        // 60s is too aggressive for slow networks/devices and was causing false timeout + late Rx errors.
+        val progressTimeoutSeconds = 180L
         val overallStart = System.currentTimeMillis()
 
         for (attempt in 1..maxRetries) {
@@ -905,13 +995,14 @@ class SessionManager @Inject constructor(
                 // Use non-blocking download() with onErrorComplete() to swallow errors
                 val downloadObservable = d2Instance.metadataModule().download()
                     .doOnNext { progress ->
-                        val percent = progress.percentage() ?: 0.0
-                        Log.d("SessionManager", "Metadata progress: ${percent.toInt()}%")
+                        val rawPercent = progress.percentage() ?: 0.0
+                        val clampedPercent = rawPercent.coerceIn(0.0, 100.0)
+                        Log.d("SessionManager", "Metadata progress: ${clampedPercent.toInt()}%")
                         onProgress(NavigationProgress(
                             phase = LoadingPhase.DOWNLOADING_METADATA,
-                            overallPercentage = 30 + (percent * 0.5).toInt(),
+                            overallPercentage = (30 + (clampedPercent * 0.5).toInt()).coerceAtMost(80),
                             phaseTitle = "Downloading Metadata",
-                            phaseDetail = "Progress: ${percent.toInt()}%"
+                            phaseDetail = "Progress: ${clampedPercent.toInt()}%"
                         ))
                     }
                     .timeout(progressTimeoutSeconds, TimeUnit.SECONDS)
@@ -1425,7 +1516,37 @@ class SessionManager @Inject constructor(
                     _currentAccountId.value = activeAccountInfo.accountId
                     Log.d("SessionManager", "Emitted currentAccountId: ${activeAccountInfo.accountId}")
                 } else {
-                    Log.w("SessionManager", "User is logged in but no active account found - database may be stale")
+                    Log.w("SessionManager", "User is logged in but no active account found - attempting recovery from stored credentials")
+
+                    // Recovery path: app/process can restart while login/sync was in progress,
+                    // leaving D2 logged-in state without active-account binding.
+                    val prefs = context.getSharedPreferences("session_prefs", Context.MODE_PRIVATE)
+                    val storedUsername = prefs.getString("username", null)
+                    val storedServerUrl = prefs.getString("serverUrl", null)
+
+                    if (!storedUsername.isNullOrBlank() && !storedServerUrl.isNullOrBlank()) {
+                        runCatching {
+                            val recovered = accountManager.getOrCreateAccount(context, storedUsername, storedServerUrl)
+                            accountManager.setActiveAccountId(context, recovered.accountId)
+                            val db = databaseManager.getDatabaseForAccount(context, recovered)
+                            Log.d("SessionManager", "Recovered active account and switched DB: ${recovered.roomDatabaseName}")
+
+                            // Ensure minimal metadata exists for immediate screen usage.
+                            val hasMetadata = db.dataElementDao().getAll().isNotEmpty() &&
+                                db.categoryOptionComboDao().getAll().isNotEmpty()
+                            if (!hasMetadata) {
+                                Log.w("SessionManager", "Recovered account DB missing metadata, hydrating from SDK")
+                                hydrateRoomFromSdk(context, db, RoomHydrationMode.MINIMAL)
+                            }
+
+                            _currentAccountId.value = recovered.accountId
+                            Log.d("SessionManager", "Recovery emitted currentAccountId: ${recovered.accountId}")
+                        }.onFailure {
+                            Log.e("SessionManager", "Failed to recover active account binding", it)
+                        }
+                    } else {
+                        Log.w("SessionManager", "Recovery skipped: no stored username/serverUrl")
+                    }
                 }
 
                 return@withContext

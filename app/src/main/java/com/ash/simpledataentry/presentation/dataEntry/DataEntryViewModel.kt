@@ -1,9 +1,17 @@
 package com.ash.simpledataentry.presentation.dataEntry
 
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.foundation.layout.size
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -17,6 +25,7 @@ import com.ash.simpledataentry.data.sync.SyncQueueManager
 import com.ash.simpledataentry.data.sync.SyncStatusController
 import com.ash.simpledataentry.domain.repository.DataEntryRepository
 import com.ash.simpledataentry.domain.useCase.DataEntryUseCases
+import com.ash.simpledataentry.presentation.MainActivity
 import com.ash.simpledataentry.util.NetworkUtils
 import com.ash.simpledataentry.data.sync.NetworkStateManager
 import com.ash.simpledataentry.presentation.core.LoadingOperation
@@ -119,6 +128,11 @@ class DataEntryViewModel @Inject constructor(
     private val metadataCacheService: com.ash.simpledataentry.data.cache.MetadataCacheService,
     private val syncStatusController: SyncStatusController
 ) : ViewModel() {
+    companion object {
+        private const val FORM_PREP_CHANNEL_ID = "form_prep_channel"
+        private const val FORM_PREP_NOTIFICATION_ID = 2302
+    }
+
     private val _state = MutableStateFlow(DataEntryState())
     val state: StateFlow<DataEntryState> = _state.asStateFlow()
     private val _uiState = MutableStateFlow<UiState<DataEntryState>>(UiState.Loading(LoadingOperation.Initial))
@@ -154,6 +168,46 @@ class DataEntryViewModel @Inject constructor(
 
     private fun setUiError(error: UiError) {
         _uiState.value = UiState.Error(error, previousData = lastSuccessfulState)
+    }
+
+    private fun updateFormPreparationNotification(progress: Int, message: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                FORM_PREP_CHANNEL_ID,
+                "Form Preparation",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows form preparation progress"
+            }
+            val notificationManager = application.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val openAppIntent = Intent(application, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            application,
+            2302,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(application, FORM_PREP_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("Preparing form")
+            .setContentText(message)
+            .setProgress(100, progress.coerceIn(0, 100), false)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        NotificationManagerCompat.from(application).notify(FORM_PREP_NOTIFICATION_ID, notification)
+    }
+
+    private fun clearFormPreparationNotification() {
+        NotificationManagerCompat.from(application).cancel(FORM_PREP_NOTIFICATION_ID)
     }
 
     // Grouping analyzer for intelligent data element organization
@@ -218,8 +272,21 @@ class DataEntryViewModel @Inject constructor(
         skipBackgroundRefresh: Boolean = false
     ) {
         viewModelScope.launch(Dispatchers.IO) {
+            val loadId = "${datasetId.takeLast(6)}-${System.currentTimeMillis() % 100000}"
+            val startMs = SystemClock.elapsedRealtime()
+            var lastMarkMs = startMs
+            fun logStage(stage: String) {
+                val now = SystemClock.elapsedRealtime()
+                val total = now - startMs
+                val delta = now - lastMarkMs
+                lastMarkMs = now
+                Log.i("FormPerf", "[$loadId] $stage | +${delta}ms | total=${total}ms")
+            }
             try {
+                logStage("START loadDataValues(period=$period, orgUnit=${orgUnitId.takeLast(6)})")
+                updateFormPreparationNotification(5, "Initializing form...")
                 val attributeOptionCombos = repository.getAttributeOptionCombos(datasetId)
+                logStage("Fetched attribute option combos: ${attributeOptionCombos.size}")
                 val resolvedAttributeOptionCombo = resolveAssignableAttributeOptionCombo(
                     datasetId = datasetId,
                     period = period,
@@ -227,6 +294,7 @@ class DataEntryViewModel @Inject constructor(
                     preferredAttributeOptionCombo = attributeOptionCombo,
                     attributeOptionCombos = attributeOptionCombos
                 )
+                logStage("Resolved attribute option combo")
                 val editabilityDeferred = async {
                     resolveDatasetEditability(
                         datasetId = datasetId,
@@ -267,6 +335,7 @@ class DataEntryViewModel @Inject constructor(
                     operation = LoadingOperation.Navigation(initialProgress),
                     progress = LoadingProgress(message = initialProgress.phaseDetail)
                 )
+                updateFormPreparationNotification(10, "Preparing form...")
 
                 // Step 1: Load Drafts (10-30%)
                 updateState {
@@ -284,6 +353,7 @@ class DataEntryViewModel @Inject constructor(
                 val drafts = withContext(Dispatchers.IO) {
                     draftDao.getDraftsForInstance(datasetId, period, orgUnitId, resolvedAttributeOptionCombo)
                 }
+                logStage("Loaded drafts: ${drafts.size}")
                 val draftMap = drafts.associateBy { it.dataElement to it.categoryOptionCombo }
 
                 // Step 2: Load Data Values (30-50%)
@@ -301,7 +371,14 @@ class DataEntryViewModel @Inject constructor(
 
                 val dataValuesFlow = repository.getDataValues(datasetId, period, orgUnitId, resolvedAttributeOptionCombo)
                 var refreshTriggered = false
+                var firstEmission = true
                 dataValuesFlow.collect { values ->
+                    if (firstEmission) {
+                        logStage("First data values emission: ${values.size} values")
+                        firstEmission = false
+                    } else {
+                        logStage("Subsequent data values emission: ${values.size} values")
+                    }
                     // Step 3: Process Categories (50-70%)
                     updateState {
                         it.copy(
@@ -330,31 +407,55 @@ class DataEntryViewModel @Inject constructor(
                     Log.d("DataEntryViewModel", "=== CATEGORY COMBO STRUCTURE LOADING ===")
                     Log.d("DataEntryViewModel", "Found ${uniqueCategoryCombos.size} unique category option combos")
 
-                    uniqueCategoryCombos.map { comboUid ->
-                        async {
-                            if (!categoryComboStructures.containsKey(comboUid)) {
-                                val structure = repository.getCategoryComboStructure(comboUid)
-                                categoryComboStructures[comboUid] = structure
+                    val comboList = uniqueCategoryCombos.toList()
+                    val totalCombos = comboList.size
+                    val chunkSize = 24
+                    var processedCombos = 0
 
-                                // DEBUG: Log the structure for each combo
-                                if (structure.isEmpty()) {
-                                    Log.d("DataEntryViewModel", "  ComboUID $comboUid -> EMPTY structure (default)")
-                                } else {
-                                    Log.d("DataEntryViewModel", "  ComboUID $comboUid -> ${structure.size} categories:")
-                                    structure.forEach { (catName, options) ->
-                                        Log.d("DataEntryViewModel", "    - $catName: ${options.size} options")
+                    comboList.chunked(chunkSize).forEach { chunk ->
+                        chunk.map { comboUid ->
+                            async {
+                                if (!categoryComboStructures.containsKey(comboUid)) {
+                                    val structure = repository.getCategoryComboStructure(comboUid)
+                                    categoryComboStructures[comboUid] = structure
+
+                                    // DEBUG: Log the structure for each combo
+                                    if (structure.isEmpty()) {
+                                        Log.d("DataEntryViewModel", "  ComboUID $comboUid -> EMPTY structure (default)")
+                                    } else {
+                                        Log.d("DataEntryViewModel", "  ComboUID $comboUid -> ${structure.size} categories:")
+                                        structure.forEach { (catName, options) ->
+                                            Log.d("DataEntryViewModel", "    - $catName: ${options.size} options")
+                                        }
                                     }
-                                }
 
-                                val combos = repository.getCategoryOptionCombos(comboUid)
-                                val map = combos.associate { coc ->
-                                    val optionUids = coc.second.toSet()
-                                    optionUids to coc.first
+                                    val combos = repository.getCategoryOptionCombos(comboUid)
+                                    val map = combos.associate { coc ->
+                                        val optionUids = coc.second.toSet()
+                                        optionUids to coc.first
+                                    }
+                                    optionUidsToComboUid[comboUid] = map
                                 }
-                                optionUidsToComboUid[comboUid] = map
                             }
+                        }.awaitAll()
+
+                        processedCombos = (processedCombos + chunk.size).coerceAtMost(totalCombos)
+                        val categoryPercent = if (totalCombos == 0) 70 else 50 + ((processedCombos * 20) / totalCombos)
+                        val detail = "Processing categories... $processedCombos/$totalCombos"
+                        updateState {
+                            it.copy(
+                                navigationProgress = com.ash.simpledataentry.presentation.core.NavigationProgress(
+                                    phase = com.ash.simpledataentry.presentation.core.LoadingPhase.PROCESSING_DATA,
+                                    overallPercentage = categoryPercent,
+                                    phaseTitle = com.ash.simpledataentry.presentation.core.LoadingPhase.PROCESSING_DATA.title,
+                                    phaseDetail = detail,
+                                    loadingType = com.ash.simpledataentry.presentation.core.StepLoadingType.ENTRY
+                                )
+                            )
                         }
-                    }.awaitAll()
+                        updateFormPreparationNotification(categoryPercent, detail)
+                    }
+                    logStage("Processed category combo structures: ${uniqueCategoryCombos.size} combos")
 
                     Log.d("DataEntryViewModel", "=== CATEGORY COMBO STRUCTURE SUMMARY ===")
                     Log.d("DataEntryViewModel", "Total structures loaded: ${categoryComboStructures.size}")
@@ -381,6 +482,7 @@ class DataEntryViewModel @Inject constructor(
                     )
                     val (isEntryEditable, nonEditableReason) = editabilityDeferred.await()
                     val isCompleted = completionDeferred.await()
+                    logStage("Resolved editability/completion")
 
                     dirtyDataValues.clear()
                     savePressed = false // Reset save state when loading new data
@@ -406,6 +508,8 @@ class DataEntryViewModel @Inject constructor(
                     val optionSets = optionSetCache[datasetId] ?: repository.getAllOptionSetsForDataset(datasetId).also {
                         optionSetCache[datasetId] = it
                     }
+                    logStage("Loaded option sets: ${optionSets.size}")
+                    updateFormPreparationNotification(78, "Loading option sets...")
 
                     // Compute render types on background thread to avoid UI freezes
                     val renderTypes = renderTypeCache[datasetId] ?: withContext(Dispatchers.Default) {
@@ -413,10 +517,12 @@ class DataEntryViewModel @Inject constructor(
                             optionSet.computeRenderType()
                         }
                     }.also { renderTypeCache[datasetId] = it }
+                    logStage("Computed render types: ${renderTypes.size}")
 
                     // Fetch validation rules for intelligent grouping
                     val validationRules = repository.getValidationRulesForDataset(datasetId)
                     Log.d("DataEntryViewModel", "Fetched ${validationRules.size} validation rules for dataset $datasetId")
+                    logStage("Loaded validation rules: ${validationRules.size}")
 
                     // Step 3.6: Analyze grouping strategies per section (75-85%)
                     updateState {
@@ -464,6 +570,8 @@ class DataEntryViewModel @Inject constructor(
 
                         computed
                     }
+                    logStage("Computed section grouping strategies: ${sectionGroupingStrategies.size} sections")
+                    updateFormPreparationNotification(88, "Computing form sections...")
 
                     // Preserve legacy radio button groups for backward compatibility and merge heuristics
                     val analyzerRadioGroups = sectionGroupingStrategies.values
@@ -571,11 +679,16 @@ class DataEntryViewModel @Inject constructor(
                             metadataDisabledFields = metadataDisabledFields
                         )
                     }
+                    logStage("State updated with form data")
+                    updateFormPreparationNotification(100, "Form ready")
                 }
                 
                 // Load draft count after data is loaded
                 loadDraftCount()
+                logStage("Draft count refreshed")
                 emitSuccessState()
+                logStage("END loadDataValues -> success")
+                clearFormPreparationNotification()
                 if (!skipBackgroundRefresh && !refreshTriggered) {
                     refreshTriggered = true
                     maybeRefreshDataValues(
@@ -588,6 +701,9 @@ class DataEntryViewModel @Inject constructor(
 
             } catch (e: Exception) {
                 Log.e("DataEntryViewModel", "Failed to load data values", e)
+                val totalMs = SystemClock.elapsedRealtime() - startMs
+                Log.e("FormPerf", "[$loadId] FAILED loadDataValues after ${totalMs}ms: ${e.message}")
+                clearFormPreparationNotification()
                 updateState { currentState ->
                     currentState.copy(
                         error = "Failed to load data values: ${e.message}",
@@ -971,15 +1087,11 @@ class DataEntryViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 repository.refreshDataValues(datasetId, period, orgUnit, attributeOptionCombo)
-                loadDataValues(
-                    datasetId = datasetId,
-                    datasetName = _state.value.datasetName,
-                    period = period,
-                    orgUnitId = orgUnit,
-                    attributeOptionCombo = attributeOptionCombo,
-                    isEditMode = _state.value.isEditMode,
-                    skipBackgroundRefresh = true
-                )
+                // IMPORTANT:
+                // `loadDataValues()` already has an active Flow collector for this instance.
+                // Triggering another `loadDataValues()` here creates a second full load cycle,
+                // which causes the visible "form -> loading -> form" glitch.
+                // Refreshing the repository is enough; the existing collector will emit updated data.
             } catch (e: Exception) {
                 Log.w("DataEntryViewModel", "Background refresh failed: ${e.message}")
             } finally {

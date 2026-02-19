@@ -48,6 +48,21 @@ class AuthRepositoryImpl @Inject constructor(
         return true
     }
 
+    suspend fun loginAuthOnly(
+        serverUrl: String,
+        username: String,
+        password: String,
+        context: Context
+    ): Boolean {
+        return try {
+            sessionManager.authenticateOnly(context, Dhis2Config(serverUrl, username, password))
+            metadataCacheService.clearAllCaches()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /**
      * Attempt offline login with saved account data
      */

@@ -68,6 +68,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -495,6 +496,7 @@ fun DatasetsScreen(
     navController: NavController,
     viewModel: DatasetsViewModel = hiltViewModel()
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by rememberSaveable { mutableStateOf(HomeTab.Home) }
@@ -504,12 +506,22 @@ fun DatasetsScreen(
     val syncState by viewModel.syncController.appSyncState.collectAsState()
     val backgroundSyncRunning by viewModel.backgroundSyncRunning.collectAsState()
     val isRefreshingAfterSync by viewModel.isRefreshingAfterSync.collectAsState()
+    val hasActiveSession by viewModel.hasActiveSession.collectAsState()
     val lastSyncLabel = syncState.lastSync?.let { formatRelativeTime(it) } ?: "Never"
     val syncStatusLabel = when {
         backgroundSyncRunning || syncState.isRunning -> "Sync in progress"
         !syncState.error.isNullOrBlank() -> "Sync error"
         isRefreshingAfterSync -> "Updating list"
         else -> "Up to date"
+    }
+
+    LaunchedEffect(hasActiveSession) {
+        if (!hasActiveSession) {
+            navController.navigate("login") {
+                popUpTo(navController.graph.id) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
     }
 
     Scaffold(
@@ -603,6 +615,7 @@ fun DatasetsScreen(
                             }
                         },
                         syncInProgress = syncState.isRunning,
+                        backgroundSyncRunning = backgroundSyncRunning,
                         activeAccountLabel = activeAccountLabel,
                         lastSyncLabel = lastSyncLabel,
                         syncStatusLabel = syncStatusLabel,
@@ -627,8 +640,14 @@ fun DatasetsScreen(
                         onAbout = { navController.navigate(Screen.AboutScreen.route) },
                         onReportIssues = { navController.navigate(Screen.ReportIssuesScreen.route) },
                         onLogout = {
-                            viewModel.logout()
-                            navController.navigate("login") { popUpTo(0) }
+                            viewModel.logout(context) { loggedOut ->
+                                if (loggedOut) {
+                                    navController.navigate("login") {
+                                        popUpTo(navController.graph.id) { inclusive = true }
+                                        launchSingleTop = true
+                                    }
+                                }
+                            }
                         }
                     )
                 }
@@ -673,6 +692,7 @@ private fun HomeContent(
     onProgramSelected: (ProgramItem) -> Unit,
     onSyncClick: () -> Unit,
     syncInProgress: Boolean,
+    backgroundSyncRunning: Boolean,
     activeAccountLabel: String?,
     lastSyncLabel: String,
     syncStatusLabel: String,
@@ -681,11 +701,12 @@ private fun HomeContent(
     val welcomeName = activeAccountLabel ?: "User"
     val programs = data.filteredPrograms
     val showProgramList = searchQuery.isNotBlank() || data.currentProgramType != DomainProgramType.ALL
+    val showSyncChip = syncInProgress || backgroundSyncRunning
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 140.dp)
+            contentPadding = PaddingValues(bottom = 24.dp)
         ) {
             item {
                 Column(
@@ -765,9 +786,66 @@ private fun HomeContent(
                 }
             }
 
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TextField(
+                        value = searchQuery,
+                        onValueChange = onSearchChange,
+                        placeholder = { Text("Search programs...") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        ),
+                        shape = RoundedCornerShape(18.dp)
+                    )
+
+                    if (showSyncChip) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Text(
+                                    text = "Syncing metadata...",
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             if (showProgramList) {
                 if (programs.isEmpty()) {
                     item {
+                        val isSyncing = syncInProgress || backgroundSyncRunning
                         val showMessage = data.currentProgramType != DomainProgramType.ALL ||
                             data.currentFilter.searchQuery.isNotBlank()
                         if (showMessage) {
@@ -781,19 +859,37 @@ private fun HomeContent(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text(
-                                        text = "No programs found",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = "Try re-sync to retrieve metadata.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        textAlign = TextAlign.Center
-                                    )
-                                    TextButton(onClick = onSyncClick) {
-                                        Text("Sync metadata")
+                                    if (isSyncing) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(22.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                        Text(
+                                            text = "Syncing metadata in background...",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Programs will appear automatically when sync completes.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "No programs found",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Try re-sync to retrieve metadata.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center
+                                        )
+                                        TextButton(onClick = onSyncClick) {
+                                            Text("Sync metadata")
+                                        }
                                     }
                                 }
                             }
@@ -947,49 +1043,6 @@ private fun HomeContent(
                 }
             }
         }
-
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(horizontal = 16.dp, vertical = 16.dp)
-                .fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            TextField(
-                value = searchQuery,
-                onValueChange = onSearchChange,
-                placeholder = { Text("Search programs...") },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = null
-                    )
-                },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent
-                ),
-                shape = RoundedCornerShape(18.dp)
-            )
-
-            IconButton(
-                onClick = { navController.navigate(Screen.SettingsScreen.route) }
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Settings",
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-
-
     }
 }
 

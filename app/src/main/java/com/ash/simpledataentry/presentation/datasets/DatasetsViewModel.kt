@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -81,6 +82,8 @@ class DatasetsViewModel @Inject constructor(
     val backgroundSyncRunning: StateFlow<Boolean> = _backgroundSyncRunning.asStateFlow()
     private val _isRefreshingAfterSync = MutableStateFlow(false)
     val isRefreshingAfterSync: StateFlow<Boolean> = _isRefreshingAfterSync.asStateFlow()
+    private val _hasActiveSession = MutableStateFlow(true)
+    val hasActiveSession: StateFlow<Boolean> = _hasActiveSession.asStateFlow()
     private var wasBackgroundSyncRunning: Boolean = false
 
     init {
@@ -92,9 +95,11 @@ class DatasetsViewModel @Inject constructor(
                     resetToInitialState()
                     _activeAccountLabel.value = null
                     _activeAccountSubtitle.value = null
+                    _hasActiveSession.value = false
                 } else {
                     // Account switched or restored - reload programs from correct database
                     Log.d("DatasetsViewModel", "Account changed/restored: $accountId - reloading programs")
+                    _hasActiveSession.value = true
                     loadPrograms()
                     refreshActiveAccountLabel()
                 }
@@ -102,13 +107,29 @@ class DatasetsViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            backgroundSyncManager.getSyncWorkInfo()
+            val dataSyncRunningFlow = backgroundSyncManager.getSyncWorkInfo()
                 .asFlow()
-                .map { workInfos ->
-                    workInfos.any { info ->
-                        info.state == WorkInfo.State.RUNNING
+                .map { infos -> infos.any { it.state == WorkInfo.State.RUNNING } }
+
+            val periodicMetadataRunningFlow = backgroundSyncManager.getMetadataSyncWorkInfo()
+                .asFlow()
+                .map { infos -> infos.any { it.state == WorkInfo.State.RUNNING } }
+
+            val immediateMetadataRunningFlow = backgroundSyncManager.getImmediateMetadataSyncWorkInfoByTag()
+                .asFlow()
+                .map { infos ->
+                    infos.any { info ->
+                        info.state == WorkInfo.State.ENQUEUED || info.state == WorkInfo.State.RUNNING
                     }
                 }
+
+            combine(
+                dataSyncRunningFlow,
+                periodicMetadataRunningFlow,
+                immediateMetadataRunningFlow
+            ) { dataSyncRunning, periodicMetadataRunning, immediateMetadataRunning ->
+                dataSyncRunning || periodicMetadataRunning || immediateMetadataRunning
+            }
                 .distinctUntilChanged()
                 .collect { isRunning ->
                     _backgroundSyncRunning.value = isRunning
@@ -479,15 +500,18 @@ class DatasetsViewModel @Inject constructor(
         }
 
 
-    fun logout() {
+    fun logout(context: android.content.Context, onComplete: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             try {
                 // Stop background prefetching and clear caches
                 backgroundDataPrefetcher.clearAllCaches()
-                logoutUseCase()
+                sessionManager.logout(context)
+                _hasActiveSession.value = false
+                onComplete(true)
             } catch (e: Exception) {
                 val uiError = e.toUiError()
                 _uiState.emitError(uiError)
+                onComplete(false)
             }
         }
     }

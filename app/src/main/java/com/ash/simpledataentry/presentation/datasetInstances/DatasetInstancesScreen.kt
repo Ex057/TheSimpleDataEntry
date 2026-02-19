@@ -627,6 +627,16 @@ fun DatasetInstancesScreen(
     val hasBlockingOverlay = currentUiState is UiState.Loading &&
         currentUiState.operation !is LoadingOperation.Initial &&
         currentData != null
+    var showBlockingOverlayUi by remember { mutableStateOf(false) }
+    LaunchedEffect(hasBlockingOverlay) {
+        if (hasBlockingOverlay) {
+            // Prevent short "flash" overlays for very fast loads.
+            kotlinx.coroutines.delay(300)
+            if (hasBlockingOverlay) showBlockingOverlayUi = true
+        } else {
+            showBlockingOverlayUi = false
+        }
+    }
     val isBlockingOperation = hasBlockingOverlay
     val isSyncInProgress = currentUiState is UiState.Loading &&
         currentUiState.operation is LoadingOperation.Syncing
@@ -820,7 +830,7 @@ fun DatasetInstancesScreen(
                             bulkMode = bulkMode,
                             selectedInstances = selectedInstances,
                             isBlockingOperation = isBlockingOperation,
-                            hasBlockingOverlay = hasBlockingOverlay,
+                            hasBlockingOverlay = showBlockingOverlayUi,
                             uiState = currentUiState,
                             navController = navController,
                             datasetId = datasetId,

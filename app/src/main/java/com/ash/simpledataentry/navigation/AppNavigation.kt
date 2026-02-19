@@ -24,6 +24,7 @@ import com.ash.simpledataentry.presentation.datasetInstances.DatasetInstancesScr
 import com.ash.simpledataentry.presentation.datasets.DatasetsScreen
 import com.ash.simpledataentry.presentation.issues.ReportIssuesScreen
 import com.ash.simpledataentry.presentation.login.LoginScreen
+import com.ash.simpledataentry.presentation.login.ManageAccountsLoginScreen
 import com.ash.simpledataentry.presentation.settings.EditAccountScreen
 import com.ash.simpledataentry.presentation.settings.SettingsScreen
 import com.ash.simpledataentry.presentation.tracker.TrackerEnrollmentScreen
@@ -38,6 +39,7 @@ sealed class Screen(val route: String) {
     data object SettingsScreen : Screen("settings")
     data object AddAccountScreen : Screen("add_account")
     data object EditAccountScreen : Screen("edit_account")
+    data object ManageAccountsLoginScreen : Screen("manage_accounts_login")
     data object AboutScreen : Screen("about")
     data object ReportIssuesScreen : Screen("report_issues")
 //    data object CreateNewEntryScreen : Screen("createnewinstance")
@@ -60,6 +62,9 @@ fun AppNavigation(
     ) {
         composable(LoginScreen.route) {
             LoginScreen(navController = navController)
+        }
+        composable(Screen.ManageAccountsLoginScreen.route) {
+            ManageAccountsLoginScreen(navController = navController)
         }
         composable(
             route = "${Screen.AddAccountScreen.route}?skipAutoLogin={skipAutoLogin}",

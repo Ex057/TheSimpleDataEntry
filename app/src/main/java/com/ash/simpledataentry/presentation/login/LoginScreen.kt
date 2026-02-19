@@ -1,11 +1,15 @@
 package com.ash.simpledataentry.presentation.login
 
 import android.app.Activity
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +29,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +51,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -92,6 +96,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.ash.simpledataentry.R
+import com.ash.simpledataentry.navigation.Screen
 import com.ash.simpledataentry.presentation.core.AdaptiveLoadingOverlay
 import com.ash.simpledataentry.presentation.core.LoadingOperation
 import com.ash.simpledataentry.presentation.core.LoadingPhase
@@ -126,6 +131,7 @@ fun LoginScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val view = LocalView.current
+    val isNetworkAvailable = rememberNetworkAvailable()
     val isLightTheme = !isSystemInDarkTheme()
     val isDarkTheme = !isLightTheme
     val statusBarColor = if (isLightTheme) {
@@ -236,9 +242,7 @@ fun LoginScreen(
         if (loginData.isLoggedIn && !loginData.saveAccountOffered) {
             if (isAddAccount) {
                 navController.navigate(com.ash.simpledataentry.navigation.Screen.EditAccountScreen.route) {
-                    popUpTo(com.ash.simpledataentry.navigation.Screen.AddAccountScreen.route) {
-                        inclusive = true
-                    }
+                    popUpTo("login") { inclusive = true }
                     launchSingleTop = true
                 }
             } else {
@@ -269,12 +273,8 @@ fun LoginScreen(
                 isStalled -> "Taking longer than usual. Check your connection or server."
                 else -> currentStepInfo?.label ?: "Initializing..."
             },
-            actionLabel = if (isStalled) "Back to Login" else null,
-            onAction = if (isStalled) {
-                { viewModel.abortLogin(context, "Login cancelled. Please try again.") }
-            } else {
-                null
-            },
+            actionLabel = if (isStalled) "Retry" else "Cancel",
+            onAction = { viewModel.abortLogin(context, "Login cancelled. Please try again.") },
             modifier = Modifier.fillMaxSize()
         )
     } else {
@@ -288,43 +288,30 @@ fun LoginScreen(
             var password by rememberSaveable { mutableStateOf("") }
             var showUrlDropdown by remember { mutableStateOf(false) }
             var passwordVisible by remember { mutableStateOf(false) }
-            val versionLabel = runCatching {
-                val info = context.packageManager.getPackageInfo(context.packageName, 0)
-                "Version ${info.versionName}"
-            }.getOrDefault("Version")
 
-            var selectedProfileId by rememberSaveable {
-                mutableStateOf(loginData.savedAccounts.firstOrNull { it.isActive }?.id)
-            }
             var isAddingNew by rememberSaveable { mutableStateOf(loginData.savedAccounts.isEmpty()) }
 
             LaunchedEffect(loginData.savedAccounts) {
                 if (loginData.savedAccounts.isEmpty()) {
                     isAddingNew = true
-                    selectedProfileId = null
                 } else {
-                    if (selectedProfileId == null || loginData.savedAccounts.none { it.id == selectedProfileId }) {
-                        selectedProfileId = loginData.savedAccounts.firstOrNull { it.isActive }?.id
-                            ?: loginData.savedAccounts.firstOrNull()?.id
-                    }
                     isAddingNew = false
                 }
             }
 
-            val selectedProfile = loginData.savedAccounts.firstOrNull { it.id == selectedProfileId }
+            val selectedProfile = loginData.savedAccounts.firstOrNull { it.isActive }
+                ?: loginData.savedAccounts.firstOrNull()
             val hasSavedProfiles = loginData.savedAccounts.isNotEmpty()
             val showFullForm = !hasSavedProfiles || isAddingNew
-            val showPasswordOnly = hasSavedProfiles && !isAddingNew && selectedProfile != null
+            val useSavedLogin = hasSavedProfiles && !isAddingNew && selectedProfile != null
             val scrollState = rememberScrollState()
             val usernameBringIntoViewRequester = remember { BringIntoViewRequester() }
             val passwordBringIntoViewRequester = remember { BringIntoViewRequester() }
             val loginButtonBringIntoViewRequester = remember { BringIntoViewRequester() }
-            val profileBringIntoViewRequester = remember { BringIntoViewRequester() }
             val passwordFocusRequester = remember { FocusRequester() }
 
             var usernameFocused by remember { mutableStateOf(false) }
             var passwordFocused by remember { mutableStateOf(false) }
-            var focusRequestCounter by remember { mutableStateOf(0) }
 
             // Auto-scroll to bring login button into view when username field gets focus
             LaunchedEffect(usernameFocused) {
@@ -344,16 +331,7 @@ fun LoginScreen(
                 }
             }
 
-            LaunchedEffect(focusRequestCounter) {
-                if (focusRequestCounter > 0) {
-                    profileBringIntoViewRequester.bringIntoView()
-                    passwordBringIntoViewRequester.bringIntoView()
-                    kotlinx.coroutines.delay(120)
-                    passwordFocusRequester.requestFocus()
-                }
-            }
-
-            LaunchedEffect(selectedProfileId, isAddingNew) {
+            LaunchedEffect(selectedProfile?.id, isAddingNew) {
                 if (!isAddingNew) {
                     selectedProfile?.let { profile ->
                         if (serverUrl.isBlank() || serverUrl == "https://") {
@@ -381,7 +359,6 @@ fun LoginScreen(
                 username = ""
                 password = ""
                 passwordVisible = false
-                selectedProfileId = null
                 viewModel.clearUrlSuggestions()
             }
 
@@ -440,205 +417,6 @@ fun LoginScreen(
                         }
                     }
 
-                    if (hasSavedProfiles) {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .bringIntoViewRequester(profileBringIntoViewRequester),
-                            shape = RoundedCornerShape(20.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface
-                            ),
-                            border = BorderStroke(2.dp, DHIS2Blue),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Text(
-                                    text = "Saved Connections",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "Save your server details for quick access.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-
-                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    loginData.savedAccounts.forEach { profile ->
-                                        val isSelected = profile.id == selectedProfileId && !isAddingNew
-                                        val selectedContainerColor = if (isDarkTheme) {
-                                            DHIS2BlueDark
-                                        } else {
-                                            DHIS2BlueLight
-                                        }
-                                        val selectedContentColor = if (isDarkTheme) {
-                                            Color.White
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurface
-                                        }
-                                        Surface(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    val (url, user, _) = viewModel.selectAccount(profile)
-                                                    serverUrl = url
-                                                    username = user
-                                                    password = ""
-                                                    selectedProfileId = profile.id
-                                                    isAddingNew = false
-                                                    focusRequestCounter += 1
-                                            },
-                                            shape = RoundedCornerShape(16.dp),
-                                            color = if (isSelected) selectedContainerColor else MaterialTheme.colorScheme.surface,
-                                            contentColor = if (isSelected) selectedContentColor else MaterialTheme.colorScheme.onSurface,
-                                            border = BorderStroke(
-                                                width = if (isSelected) 2.dp else 1.dp,
-                                                color = if (isSelected) DHIS2Blue else MaterialTheme.colorScheme.outline
-                                            ),
-                                            tonalElevation = if (isSelected) 4.dp else 0.dp
-                                        ) {
-                                            Column(
-                                                modifier = Modifier.padding(14.dp),
-                                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                                ) {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .size(36.dp)
-                                                            .background(
-                                                                color = DHIS2Blue.copy(alpha = 0.2f),
-                                                                shape = CircleShape
-                                                            ),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.Cloud,
-                                                            contentDescription = null,
-                                                            tint = DHIS2Blue,
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
-                                                    }
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Text(
-                                                            text = profile.displayName,
-                                                            style = MaterialTheme.typography.bodyMedium
-                                                        )
-                                                        Text(
-                                                            text = profile.username,
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                    if (isSelected) {
-                                                        Text(
-                                                            text = "Selected",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.primary
-                                                        )
-                                                    }
-                                                }
-                                                Text(
-                                                    text = profile.serverUrl,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    maxLines = 1
-                                                )
-                                                Text(
-                                                    text = "Last used ${formatRelativeTime(profile.lastUsed)}",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(vertical = 4.dp),
-                                    color = MaterialTheme.colorScheme.outlineVariant
-                                )
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            resetForm()
-                                            isAddingNew = true
-                                        },
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Add,
-                                        contentDescription = "Add connection",
-                                        tint = DHIS2Blue
-                                    )
-                                    Text(
-                                        text = "Add Connection",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                            }
-                        }
-                    } else {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .bringIntoViewRequester(profileBringIntoViewRequester),
-                            shape = RoundedCornerShape(20.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface
-                            ),
-                            border = BorderStroke(2.dp, DHIS2Blue),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Text(
-                                    text = "No Saved Connections",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "No saved connections. Add one to sign in faster next time.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            resetForm()
-                                            isAddingNew = true
-                                        },
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Add,
-                                        contentDescription = "Add connection",
-                                        tint = DHIS2Blue
-                                    )
-                                    Text(
-                                        text = "Add Connection",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                            }
-                        }
-                    }
-
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(24.dp),
@@ -657,18 +435,14 @@ fun LoginScreen(
                                 .padding(24.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            if (showPasswordOnly && selectedProfile != null) {
+                            if (useSavedLogin && selectedProfile != null) {
                                 Text(
-                                    text = "Signing in as",
+                                    text = "Saved account found",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
-                                    text = selectedProfile.username,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = selectedProfile.serverUrl,
+                                    text = "Use Manage accounts to enter password and sign in.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -849,7 +623,7 @@ fun LoginScreen(
                                         )
                                     }
                                 )
-                            } else if (!showPasswordOnly) {
+                            } else {
                                 Text(
                                     text = "Select a saved connection to continue.",
                                     style = MaterialTheme.typography.bodySmall,
@@ -857,7 +631,7 @@ fun LoginScreen(
                                 )
                             }
 
-                            if (showFullForm || showPasswordOnly) {
+                            if (!useSavedLogin && showFullForm) {
                                 OutlinedTextField(
                                     value = password,
                                     onValueChange = { password = it },
@@ -892,104 +666,111 @@ fun LoginScreen(
                                 )
                             }
 
-                            Surface(
-                                color = if (isDarkTheme) {
-                                    DHIS2BlueDark.copy(alpha = 0.7f)
-                                } else {
-                                    DHIS2BlueLight.copy(alpha = 0.3f)
-                                },
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
+                            if (!useSavedLogin && !isNetworkAvailable) {
+                                Surface(
+                                    color = Color(0xFFFFE8CC),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Cloud,
+                                            contentDescription = null,
+                                            tint = Color(0xFFB25E09)
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "No internet connection",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = Color(0xFF8A4B08)
+                                            )
+                                            Text(
+                                                text = "Online sign-in needs internet. Connect and try again, or use a saved account if available.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = Color(0xFF8A4B08).copy(alpha = 0.9f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!useSavedLogin) {
                                 Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Cloud,
-                                        contentDescription = null,
-                                        tint = DHIS2Blue
-                                    )
-                                    Column {
-                                        Text(
-                                            text = "Internet connection required",
-                                            style = MaterialTheme.typography.bodyMedium
+                                    OutlinedButton(
+                                        onClick = {
+                                            resetForm()
+                                            if (hasSavedProfiles) {
+                                                isAddingNew = false
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp),
+                                        shape = RoundedCornerShape(16.dp)
+                                    ) {
+                                        Text("Cancel")
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            viewModel.loginWithBackgroundBootstrap(serverUrl, username, password, context)
+                                        },
+                                        enabled = !isLoading &&
+                                                serverUrl.isNotBlank() &&
+                                                username.isNotBlank() &&
+                                                password.isNotBlank(),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .bringIntoViewRequester(loginButtonBringIntoViewRequester),
+                                        shape = RoundedCornerShape(16.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.primary
                                         )
+                                    ) {
                                         Text(
-                                            text = "Sync in real time with DHIS2 servers.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = "Login",
+                                            color = Color.White,
+                                            style = MaterialTheme.typography.bodyLarge
                                         )
                                     }
                                 }
                             }
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        resetForm()
-                                        if (hasSavedProfiles) {
-                                            isAddingNew = false
-                                            selectedProfileId = loginData.savedAccounts.firstOrNull { it.isActive }?.id
-                                                ?: loginData.savedAccounts.firstOrNull()?.id
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(48.dp),
-                                    shape = RoundedCornerShape(16.dp)
-                                ) {
-                                    Text("Cancel")
-                                }
-
+                            if (useSavedLogin) {
                                 Button(
-                                    onClick = {
-                                        val resolvedServerUrl = if (showPasswordOnly) {
-                                            selectedProfile?.serverUrl.orEmpty()
-                                        } else {
-                                            serverUrl
-                                        }
-                                        val resolvedUsername = if (showPasswordOnly) {
-                                            selectedProfile?.username.orEmpty()
-                                        } else {
-                                            username
-                                        }
-                                        viewModel.loginWithProgress(resolvedServerUrl, resolvedUsername, password, context)
-                                    },
-                                    enabled = !isLoading &&
-                                            (if (showFullForm) serverUrl.isNotBlank() else selectedProfile?.serverUrl?.isNotBlank() == true) &&
-                                            (if (showFullForm) username.isNotBlank() else selectedProfile?.username?.isNotBlank() == true) &&
-                                            password.isNotBlank(),
+                                    onClick = { navController.navigate(Screen.ManageAccountsLoginScreen.route) },
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .height(48.dp)
-                                        .bringIntoViewRequester(loginButtonBringIntoViewRequester),
+                                        .fillMaxWidth()
+                                        .height(50.dp),
                                     shape = RoundedCornerShape(16.dp),
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = MaterialTheme.colorScheme.primary
                                     )
                                 ) {
                                     Text(
-                                        text = "Login",
+                                        text = "Manage accounts",
                                         color = Color.White,
                                         style = MaterialTheme.typography.bodyLarge
                                     )
                                 }
-                            }
-
-                            TextButton(
-                                onClick = { /* TODO: Implement forgot password functionality */ },
-                                modifier = Modifier.align(Alignment.End)
-                            ) {
-                                Text(
-                                    text = "Forgot Password",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
+                                TextButton(
+                                    onClick = {
+                                        isAddingNew = true
+                                        password = ""
+                                    },
+                                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                                ) {
+                                    Text("Use different account")
+                                }
                             }
                         }
                     }
@@ -1016,14 +797,9 @@ fun LoginScreen(
                     )
                 }
 
-                Text(
-                    text = versionLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.8f),
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 16.dp)
-                )
+                if (hasSavedProfiles) {
+                    // Managed inside the saved-account card to avoid duplicate entry points.
+                }
             }
         }
     }
@@ -1032,7 +808,8 @@ fun LoginScreen(
     if (loginData.saveAccountOffered && loginData.pendingCredentials != null) {
         android.util.Log.d("LoginDebug", "About to show save account dialog")
 
-        var displayName by remember { mutableStateOf("") }
+        val pending = loginData.pendingCredentials
+        var displayName by remember(pending) { mutableStateOf("") }
 
         AlertDialog(
             onDismissRequest = {
@@ -1047,21 +824,20 @@ fun LoginScreen(
                     OutlinedTextField(
                         value = displayName,
                         onValueChange = { displayName = it },
-                        label = { Text("Display Name") },
-                        placeholder = { Text("e.g., Work Account, Personal") },
+                        label = { Text("Display name (optional)") },
+                        placeholder = { Text("Default: username") },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
             confirmButton = {
+                val resolvedName = displayName.trim().ifBlank { pending.second }
                 Button(
                     onClick = {
-                        if (displayName.isNotBlank()) {
-                            android.util.Log.d("LoginDebug", "Saving account: $displayName")
-                            viewModel.savePendingAccount(displayName)
-                        }
+                        android.util.Log.d("LoginDebug", "Saving account: $resolvedName")
+                        viewModel.savePendingAccount(resolvedName)
                     },
-                    enabled = displayName.isNotBlank()
+                    enabled = resolvedName.isNotBlank()
                 ) {
                     Text("Save")
                 }
@@ -1078,6 +854,50 @@ fun LoginScreen(
             }
         )
     }
+}
+
+@Composable
+private fun rememberNetworkAvailable(): Boolean {
+    val context = LocalContext.current
+    val connectivityManager = remember {
+        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+    var isConnected by remember {
+        mutableStateOf(connectivityManager.isCurrentlyConnected())
+    }
+
+    DisposableEffect(connectivityManager) {
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                isConnected = true
+            }
+
+            override fun onLost(network: Network) {
+                isConnected = connectivityManager.isCurrentlyConnected()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                isConnected = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            }
+        }
+
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        connectivityManager.registerNetworkCallback(request, callback)
+
+        onDispose {
+            runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+        }
+    }
+
+    return isConnected
+}
+
+private fun ConnectivityManager.isCurrentlyConnected(): Boolean {
+    val network = activeNetwork ?: return false
+    val capabilities = getNetworkCapabilities(network) ?: return false
+    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 }
 
 private fun formatRelativeTime(timestamp: Long): String {
