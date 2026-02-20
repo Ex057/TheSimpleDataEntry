@@ -452,10 +452,11 @@ class SyncQueueManager @Inject constructor(
                 updateProgress(SyncPhase.DOWNLOADING_DATASETS, 85, "Downloading latest data...")
 
                 withTimeout(downloadTimeoutMs) {
-                    d2.dataValueModule().dataValues().get()
+                    d2.aggregatedModule().data().blockingDownload()
                 }
 
                 updateProgress(SyncPhase.DOWNLOADING_DATASETS, 95, "Download completed")
+                Log.d(tag, "Aggregate data download completed after upload sync")
             } catch (e: Exception) {
                 Log.w(tag, "Failed to download latest data after upload: ${e.message}")
                 // Don't fail the entire sync just because download failed
@@ -776,8 +777,9 @@ class SyncQueueManager @Inject constructor(
             if (allSuccessfulDrafts.isNotEmpty()) {
                 try {
                     withTimeout(downloadTimeoutMs) {
-                        d2.dataValueModule().dataValues().get()
+                        d2.aggregatedModule().data().blockingDownload()
                     }
+                    Log.d(tag, "Aggregate data download completed after instance upload sync")
                 } catch (e: Exception) {
                     Log.w(tag, "Failed to download latest data after upload: ${e.message}")
                     // Don't fail the entire sync just because download failed

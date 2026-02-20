@@ -5,6 +5,7 @@ import com.ash.simpledataentry.domain.model.DatasetInstance
 import com.ash.simpledataentry.domain.model.DatasetInstanceState
 import com.ash.simpledataentry.domain.model.Period
 import com.ash.simpledataentry.domain.repository.DatasetInstancesRepository
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOn
@@ -202,16 +203,58 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
 
     override suspend fun completeDatasetInstance(datasetId: String, period: String, orgUnit: String, attributeOptionCombo: String): Result<Unit> {
         return withContext(Dispatchers.IO) {
-            try {
-                Log.d(TAG, "Marking dataset as complete: $datasetId, $period, $orgUnit, $attributeOptionCombo")
-                d2.dataSetModule().dataSetCompleteRegistrations().value(period,orgUnit,datasetId,attributeOptionCombo).blockingSet()
-                d2.dataSetModule().dataSetCompleteRegistrations().blockingUpload()
-                Log.d(TAG, "Dataset marked as complete successfully.")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to complete dataset instance", e)
-                Result.failure(e)
+            val attemptId = "repo-cmp-${System.currentTimeMillis()}"
+            val startMs = android.os.SystemClock.elapsedRealtime()
+            val maxAttempts = 3
+            var lastError: Exception? = null
+            for (attempt in 1..maxAttempts) {
+                try {
+                    Log.d(
+                        TAG,
+                        "[$attemptId] completeDatasetInstance attempt=$attempt/$maxAttempts dataset=$datasetId period=$period orgUnit=$orgUnit attrCombo=$attributeOptionCombo thread=${Thread.currentThread().name}"
+                    )
+                    val setStartMs = android.os.SystemClock.elapsedRealtime()
+                    Log.d(TAG, "[$attemptId] calling dataSetCompleteRegistrations.value(...).blockingSet()")
+                    d2.dataSetModule().dataSetCompleteRegistrations().value(period,orgUnit,datasetId,attributeOptionCombo).blockingSet()
+                    Log.d(
+                        TAG,
+                        "[$attemptId] blockingSet success in ${android.os.SystemClock.elapsedRealtime() - setStartMs}ms"
+                    )
+
+                    val uploadStartMs = android.os.SystemClock.elapsedRealtime()
+                    Log.d(TAG, "[$attemptId] calling dataSetCompleteRegistrations().blockingUpload()")
+                    d2.dataSetModule().dataSetCompleteRegistrations().blockingUpload()
+                    Log.d(
+                        TAG,
+                        "[$attemptId] blockingUpload success in ${android.os.SystemClock.elapsedRealtime() - uploadStartMs}ms"
+                    )
+                    Log.d(TAG, "[$attemptId] completeDatasetInstance success total=${android.os.SystemClock.elapsedRealtime() - startMs}ms")
+                    return@withContext Result.success(Unit)
+                } catch (e: Exception) {
+                    lastError = e
+                    val isNestedTransactionError = e.message?.contains(
+                        "cannot start a transaction within a transaction",
+                        ignoreCase = true
+                    ) == true
+                    Log.e(
+                        TAG,
+                        "[$attemptId] attempt=$attempt failed type=${e.javaClass.name} message=${e.message} nestedTx=$isNestedTransactionError",
+                        e
+                    )
+                    if (!isNestedTransactionError || attempt == maxAttempts) {
+                        break
+                    }
+                    val backoffMs = 300L * attempt
+                    Log.w(TAG, "[$attemptId] retrying completion in ${backoffMs}ms due to nested transaction conflict")
+                    delay(backoffMs)
+                }
             }
+            Log.e(
+                TAG,
+                "[$attemptId] Failed to complete dataset instance after ${android.os.SystemClock.elapsedRealtime() - startMs}ms",
+                lastError
+            )
+            Result.failure(lastError ?: IllegalStateException("Unknown completion failure"))
         }
     }
     

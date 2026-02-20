@@ -129,6 +129,7 @@ class DataEntryViewModel @Inject constructor(
     private val syncStatusController: SyncStatusController
 ) : ViewModel() {
     companion object {
+        private const val TAG = "DataEntryViewModel"
         private const val FORM_PREP_CHANNEL_ID = "form_prep_channel"
         private const val FORM_PREP_NOTIFICATION_ID = 2302
     }
@@ -208,6 +209,10 @@ class DataEntryViewModel @Inject constructor(
 
     private fun clearFormPreparationNotification() {
         NotificationManagerCompat.from(application).cancel(FORM_PREP_NOTIFICATION_ID)
+    }
+
+    private fun newCompletionAttemptId(): String {
+        return "cmp-${System.currentTimeMillis()}"
     }
 
     // Grouping analyzer for intelligent data element organization
@@ -468,11 +473,17 @@ class DataEntryViewModel @Inject constructor(
                     val mergedValues = values.map { fetched ->
                         val key = fetched.dataElement to fetched.categoryOptionCombo
                         draftMap[key]?.let { draft ->
-                            fetched.copy(
-                                value = draft.value,
-                                comment = draft.comment,
-                                lastModified = draft.lastModified
-                            )
+                            // Do not let stale blank drafts hide fetched/server values.
+                            // Explicit clears are handled by draft deletion path.
+                            if (draft.value.isNullOrBlank() && draft.comment.isNullOrBlank()) {
+                                fetched
+                            } else {
+                                fetched.copy(
+                                    value = draft.value,
+                                    comment = draft.comment,
+                                    lastModified = draft.lastModified
+                                )
+                            }
                         } ?: fetched
                     }
                     val valuesByCombo = mergedValues.groupBy { it.categoryOptionCombo }
@@ -744,20 +755,63 @@ class DataEntryViewModel @Inject constructor(
         preferredAttributeOptionCombo: String,
         attributeOptionCombos: List<Pair<String, String>>
     ): String = withContext(Dispatchers.IO) {
-        if (preferredAttributeOptionCombo.isNotBlank() &&
-            isAttributeOptionComboAssignable(datasetId, period, orgUnitId, preferredAttributeOptionCombo)
-        ) {
+        val comboCandidates = attributeOptionCombos.map { it.first }.filter { it.isNotBlank() }
+        val assignableCandidates = comboCandidates.filter { comboUid ->
+            isAttributeOptionComboAssignable(datasetId, period, orgUnitId, comboUid)
+        }
+
+        if (assignableCandidates.isEmpty()) {
             return@withContext preferredAttributeOptionCombo
         }
 
-        val comboCandidates = attributeOptionCombos.map { it.first }.filter { it.isNotBlank() }
-        for (comboUid in comboCandidates) {
-            if (isAttributeOptionComboAssignable(datasetId, period, orgUnitId, comboUid)) {
+        // Prefer preferred combo first (if assignable), then other assignable combos.
+        val prioritizedCandidates = buildList {
+            if (preferredAttributeOptionCombo.isNotBlank() && assignableCandidates.contains(preferredAttributeOptionCombo)) {
+                add(preferredAttributeOptionCombo)
+            }
+            addAll(assignableCandidates.filter { it != preferredAttributeOptionCombo })
+        }
+
+        for (comboUid in prioritizedCandidates) {
+            if (comboHasExistingData(datasetId, period, orgUnitId, comboUid)) {
+                Log.d(
+                    TAG,
+                    "Resolved attribute option combo with existing data: $comboUid (preferred=$preferredAttributeOptionCombo)"
+                )
                 return@withContext comboUid
             }
         }
 
-        preferredAttributeOptionCombo
+        val fallback = prioritizedCandidates.first()
+        Log.d(TAG, "Resolved attribute option combo fallback (assignable): $fallback")
+        fallback
+    }
+
+    private suspend fun comboHasExistingData(
+        datasetId: String,
+        period: String,
+        orgUnitId: String,
+        attributeOptionComboUid: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (repository.hasCachedDataValues(datasetId, period, orgUnitId, attributeOptionComboUid)) {
+                return@withContext true
+            }
+            val networkState = networkStateManager.networkState.value
+            if (!networkState.isConnected || !networkState.hasInternet) {
+                return@withContext false
+            }
+            val refreshedCount = repository.refreshDataValues(
+                datasetId = datasetId,
+                period = period,
+                orgUnit = orgUnitId,
+                attributeOptionCombo = attributeOptionComboUid
+            )
+            refreshedCount > 0
+        } catch (e: Exception) {
+            Log.w(TAG, "comboHasExistingData failed for $attributeOptionComboUid: ${e.message}")
+            false
+        }
     }
 
     private suspend fun isAttributeOptionComboAssignable(
@@ -868,33 +922,44 @@ class DataEntryViewModel @Inject constructor(
             }
 
             viewModelScope.launch(Dispatchers.IO) {
-                if (value.isNotBlank()) {
-                    draftDao.upsertDraft(
-                        DataValueDraftEntity(
+                val draftWriteId = "draft-${System.currentTimeMillis()}"
+                try {
+                    if (value.isNotBlank()) {
+                        Log.v(TAG, "[$draftWriteId] upsertDraft de=$dataElementUid coc=$categoryOptionComboUid")
+                        draftDao.upsertDraft(
+                            DataValueDraftEntity(
+                                datasetId = _state.value.datasetId,
+                                period = _state.value.period,
+                                orgUnit = _state.value.orgUnit,
+                                attributeOptionCombo = _state.value.attributeOptionCombo,
+                                dataElement = dataElementUid,
+                                categoryOptionCombo = categoryOptionComboUid,
+                                value = value,
+                                comment = updatedValueObject.comment,
+                                lastModified = System.currentTimeMillis()
+                            )
+                        )
+                    } else {
+                        Log.v(TAG, "[$draftWriteId] deleteDraft de=$dataElementUid coc=$categoryOptionComboUid")
+                        draftDao.deleteDraft(
                             datasetId = _state.value.datasetId,
                             period = _state.value.period,
                             orgUnit = _state.value.orgUnit,
                             attributeOptionCombo = _state.value.attributeOptionCombo,
                             dataElement = dataElementUid,
-                            categoryOptionCombo = categoryOptionComboUid,
-                            value = value,
-                            comment = updatedValueObject.comment,
-                            lastModified = System.currentTimeMillis()
+                            categoryOptionCombo = categoryOptionComboUid
                         )
-                    )
-                } else {
-                    draftDao.deleteDraft(
-                        datasetId = _state.value.datasetId,
-                        period = _state.value.period,
-                        orgUnit = _state.value.orgUnit,
-                        attributeOptionCombo = _state.value.attributeOptionCombo,
-                        dataElement = dataElementUid,
-                        categoryOptionCombo = categoryOptionComboUid
+                    }
+
+                    // Update draft count after draft operation
+                    loadDraftCount()
+                } catch (e: Exception) {
+                    Log.e(
+                        TAG,
+                        "[$draftWriteId] draft write failed type=${e.javaClass.name} message=${e.message}",
+                        e
                     )
                 }
-
-                // Update draft count after draft operation
-                loadDraftCount()
             }
         } else {
             Log.w("DataEntryViewModel", "NO MATCH FOUND for dataElement=$dataElementUid, combo=$categoryOptionComboUid in ${_state.value.dataValues.size} values")
@@ -916,12 +981,17 @@ class DataEntryViewModel @Inject constructor(
 
     fun saveAllDataValues(context: android.content.Context? = null) {
         viewModelScope.launch {
+            val saveId = "save-${System.currentTimeMillis()}"
             updateState { it.copy(saveInProgress = true, saveResult = null) }
             savePressed = true
             val stateSnapshot = _state.value
+            Log.d(
+                TAG,
+                "[$saveId] saveAllDataValues start dataset=${stateSnapshot.datasetId} period=${stateSnapshot.period} orgUnit=${stateSnapshot.orgUnit} attrCombo=${stateSnapshot.attributeOptionCombo} dirty=${dirtyDataValues.size}"
+            )
 
             try {
-                val draftsToSave = dirtyDataValues.values.map { dataValue ->
+                val draftsToSave = dirtyDataValues.values.filter { !it.value.isNullOrBlank() }.map { dataValue ->
                     DataValueDraftEntity(
                         datasetId = stateSnapshot.datasetId,
                         period = stateSnapshot.period,
@@ -934,12 +1004,29 @@ class DataEntryViewModel @Inject constructor(
                         lastModified = System.currentTimeMillis()
                     )
                 }
+                val draftsToDelete = dirtyDataValues.values
+                    .filter { it.value.isNullOrBlank() }
+                    .map { it.dataElement to it.categoryOptionCombo }
 
                 withContext(Dispatchers.IO) {
-                    draftDao.upsertAll(draftsToSave)
+                    Log.d(TAG, "[$saveId] upsertAll drafts=${draftsToSave.size}, deleteDrafts=${draftsToDelete.size}")
+                    if (draftsToSave.isNotEmpty()) {
+                        draftDao.upsertAll(draftsToSave)
+                    }
+                    draftsToDelete.forEach { (dataElement, categoryOptionCombo) ->
+                        draftDao.deleteDraft(
+                            datasetId = stateSnapshot.datasetId,
+                            period = stateSnapshot.period,
+                            orgUnit = stateSnapshot.orgUnit,
+                            attributeOptionCombo = stateSnapshot.attributeOptionCombo,
+                            dataElement = dataElement,
+                            categoryOptionCombo = categoryOptionCombo
+                        )
+                    }
                 }
 
                 dirtyDataValues.clear()
+                Log.d(TAG, "[$saveId] saveAllDataValues success")
 
                 updateState { it.copy(
                     saveInProgress = false,
@@ -947,6 +1034,11 @@ class DataEntryViewModel @Inject constructor(
                 ) }
 
             } catch (e: Exception) {
+                Log.e(
+                    TAG,
+                    "[$saveId] saveAllDataValues failed type=${e.javaClass.name} message=${e.message}",
+                    e
+                )
                 updateState { it.copy(
                     saveInProgress = false,
                     saveResult = Result.failure(e)
@@ -1150,11 +1242,30 @@ class DataEntryViewModel @Inject constructor(
         Log.d("DataEntryViewModel", "Starting enhanced sync for data entry: datasetId=${stateSnapshot.datasetId}, uploadFirst: $uploadFirst")
         viewModelScope.launch {
             try {
-                // Use the enhanced SyncQueueManager which provides detailed progress tracking
-                val syncResult = syncQueueManager.startSync(forceSync = uploadFirst)
+                // Respect user choice:
+                // - uploadFirst=true  -> upload local drafts, then download updates
+                // - uploadFirst=false -> download updates only (no upload)
+                val syncResult = if (uploadFirst) {
+                    syncQueueManager.startSync(forceSync = true)
+                } else {
+                    syncQueueManager.startDownloadOnlySync(forceSync = true)
+                }
                 syncResult.fold(
                     onSuccess = {
                         Log.d("DataEntryViewModel", "Enhanced sync completed successfully")
+                        // Force-refresh current instance values from SDK/server into app cache
+                        // before reloading the form, so existing web values are visible.
+                        try {
+                            val refreshed = repository.refreshDataValues(
+                                stateSnapshot.datasetId,
+                                stateSnapshot.period,
+                                stateSnapshot.orgUnit,
+                                stateSnapshot.attributeOptionCombo
+                            )
+                            Log.d("DataEntryViewModel", "Post-sync instance refresh complete: $refreshed values")
+                        } catch (e: Exception) {
+                            Log.w("DataEntryViewModel", "Post-sync instance refresh failed: ${e.message}")
+                        }
                         // Reload all data after sync
                         loadDataValues(
                             datasetId = stateSnapshot.datasetId,
@@ -1439,23 +1550,35 @@ class DataEntryViewModel @Inject constructor(
     }
 
     fun startValidationForCompletion() {
-        Log.d("DataEntryViewModel", "=== COMPLETION FLOW: Starting validation for completion ===")
-        startValidationWithCompletionProgress()
+        val attemptId = newCompletionAttemptId()
+        Log.d(
+            TAG,
+            "[$attemptId] startValidationForCompletion dataset=${_state.value.datasetId} period=${_state.value.period} orgUnit=${_state.value.orgUnit} attrCombo=${_state.value.attributeOptionCombo} values=${_state.value.dataValues.size} dirty=${dirtyDataValues.size}"
+        )
+        startValidationWithCompletionProgress(attemptId)
     }
 
     fun completeDatasetAfterValidation(onResult: (Boolean, String?) -> Unit) {
         val stateSnapshot = _state.value
         viewModelScope.launch {
-            Log.d("DataEntryViewModel", "=== COMPLETION FLOW: Proceeding with dataset completion after validation ===")
-            Log.d("DataEntryViewModel", "Dataset: ${stateSnapshot.datasetId}, Period: ${stateSnapshot.period}, OrgUnit: ${stateSnapshot.orgUnit}")
-            Log.d("DataEntryViewModel", "AttributeOptionCombo: ${stateSnapshot.attributeOptionCombo}")
+            val attemptId = newCompletionAttemptId()
+            val startMs = SystemClock.elapsedRealtime()
+            Log.d(
+                TAG,
+                "[$attemptId] completeDatasetAfterValidation start dataset=${stateSnapshot.datasetId} period=${stateSnapshot.period} orgUnit=${stateSnapshot.orgUnit} attrCombo=${stateSnapshot.attributeOptionCombo} values=${stateSnapshot.dataValues.size} dirty=${dirtyDataValues.size} validationSummary=${stateSnapshot.validationSummary != null}"
+            )
             updateState { it.copy(isLoading = true, error = null) }
             
             try {
                 val validationSummary = stateSnapshot.validationSummary
+                Log.d(
+                    TAG,
+                    "[$attemptId] validationSummary hasErrors=${validationSummary?.hasErrors} hasWarnings=${validationSummary?.hasWarnings} totalRules=${validationSummary?.totalRulesChecked} passed=${validationSummary?.passedRules}"
+                )
                 if (validationSummary?.hasErrors == true) {
                     val firstIssue = extractFirstValidationIssue(validationSummary)
                     val message = firstIssue?.description ?: "Validation failed. Please fix errors before submitting."
+                    Log.w(TAG, "[$attemptId] completion blocked by validation errors: $message")
                     applyValidationIssues(validationSummary)
                     firstIssue?.affectedDataElements?.firstOrNull()?.let { navigateToDataElement(it) }
                     updateState {
@@ -1468,11 +1591,16 @@ class DataEntryViewModel @Inject constructor(
                     return@launch
                 }
 
+                Log.d(TAG, "[$attemptId] invoking useCases.completeDatasetInstance")
                 val result = useCases.completeDatasetInstance(
                     stateSnapshot.datasetId,
                     stateSnapshot.period,
                     stateSnapshot.orgUnit,
                     stateSnapshot.attributeOptionCombo
+                )
+                Log.d(
+                    TAG,
+                    "[$attemptId] completeDatasetInstance returned success=${result.isSuccess} elapsed=${SystemClock.elapsedRealtime() - startMs}ms"
                 )
                 
                 if (result.isSuccess) {
@@ -1482,22 +1610,31 @@ class DataEntryViewModel @Inject constructor(
                         "Dataset marked as complete successfully. All validation rules passed."
                     }
                     
-                    Log.d("DataEntryViewModel", successMessage)
+                    Log.d(TAG, "[$attemptId] $successMessage")
                     updateState { it.copy(isCompleted = true, isLoading = false, validationSummary = null) }
                     onResult(true, successMessage)
                 } else {
-                    Log.e("DataEntryViewModel", "Failed to mark dataset as complete: ${result.exceptionOrNull()?.message}")
+                    val ex = result.exceptionOrNull()
+                    Log.e(
+                        TAG,
+                        "[$attemptId] Failed to mark dataset as complete: type=${ex?.javaClass?.name} message=${ex?.message}",
+                        ex
+                    )
                     updateState {
                         it.copy(
                             isLoading = false,
-                            error = result.exceptionOrNull()?.message
+                            error = ex?.message
                         )
                     }
-                    onResult(false, result.exceptionOrNull()?.message)
+                    onResult(false, ex?.message)
                 }
                 
             } catch (e: Exception) {
-                Log.e("DataEntryViewModel", "Error during completion: ${e.message}", e)
+                Log.e(
+                    TAG,
+                    "[$attemptId] Error during completion after ${SystemClock.elapsedRealtime() - startMs}ms: ${e.javaClass.name}: ${e.message}",
+                    e
+                )
                 updateState {
                     it.copy(
                         isLoading = false,
@@ -1582,6 +1719,7 @@ class DataEntryViewModel @Inject constructor(
     }
 
     fun clearValidationResult() {
+        Log.d(TAG, "clearValidationResult called")
         updateState { it.copy(validationSummary = null) }
     }
 
@@ -1625,10 +1763,15 @@ class DataEntryViewModel @Inject constructor(
         }
     }
 
-    private fun startValidationWithCompletionProgress() {
+    private fun startValidationWithCompletionProgress(attemptId: String = newCompletionAttemptId()) {
         val stateSnapshot = _state.value
         viewModelScope.launch {
+            val startMs = SystemClock.elapsedRealtime()
             try {
+                Log.d(
+                    TAG,
+                    "[$attemptId] startValidationWithCompletionProgress start dataset=${stateSnapshot.datasetId} period=${stateSnapshot.period} orgUnit=${stateSnapshot.orgUnit} attrCombo=${stateSnapshot.attributeOptionCombo} values=${stateSnapshot.dataValues.size}"
+                )
                 // Step 1: Preparing (0-10%)
                 updateState {
                     it.copy(
@@ -1666,6 +1809,10 @@ class DataEntryViewModel @Inject constructor(
                     dataValues = stateSnapshot.dataValues,
                     forceRefresh = true
                 )
+                Log.d(
+                    TAG,
+                    "[$attemptId] validationRepository returned totalRules=${validationResult.totalRulesChecked} passed=${validationResult.passedRules} warnings=${validationResult.warningCount} errors=${validationResult.errorCount}"
+                )
 
                 // Step 3: Processing Results (70-90%)
                 updateState {
@@ -1687,9 +1834,17 @@ class DataEntryViewModel @Inject constructor(
                         completionProgress = null // Clear progress when validation dialog shows
                     )
                 }
+                Log.d(
+                    TAG,
+                    "[$attemptId] startValidationWithCompletionProgress success elapsed=${SystemClock.elapsedRealtime() - startMs}ms"
+                )
 
             } catch (e: Exception) {
-                Log.e("DataEntryViewModel", "Enhanced validation failed", e)
+                Log.e(
+                    TAG,
+                    "[$attemptId] Enhanced validation failed after ${SystemClock.elapsedRealtime() - startMs}ms: ${e.javaClass.name}: ${e.message}",
+                    e
+                )
                 updateState {
                     it.copy(
                         isValidating = false,

@@ -91,6 +91,11 @@ private data class GridCellData(
     val dataValue: DataValue?
 )
 
+private data class CategoryPathRow(
+    val label: String,
+    val dataValue: DataValue
+)
+
 private val GridRowHeaderWidth = 120.dp
 
 private fun parseGridLabel(name: String): Pair<String, String>? {
@@ -124,6 +129,16 @@ private fun normalizeRowKey(value: String): String {
         .lowercase()
         .replace(Regex("\\s+"), " ")
         .replace(Regex("\\s*\\(.*?\\)\\s*"), " ")
+        .trim()
+}
+
+private fun cleanUserLabel(raw: String?): String {
+    if (raw.isNullOrBlank()) return ""
+    return raw
+        .split("/")
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.equals("default", ignoreCase = true) }
+        .joinToString(" / ")
         .trim()
 }
 
@@ -184,6 +199,62 @@ fun SectionContent(
                     viewModel = viewModel,
                     showLabel = false
                 )
+            } else if (structure.size == 1) {
+                val category = structure.first()
+                val optionNameByUid = category.second.toMap()
+                val rows = category.second.mapNotNull { (optionUid, optionName) ->
+                    val comboUid = optionMap.entries.firstOrNull { (optionSet, _) ->
+                        optionSet.size == 1 && optionSet.contains(optionUid)
+                    }?.value ?: optionMap.entries.firstOrNull { (optionSet, _) ->
+                        optionSet.contains(optionUid)
+                    }?.value
+                    val dataValue = comboUid?.let { combo ->
+                        dataElementValues.firstOrNull { it.categoryOptionCombo == combo }
+                    }
+                    dataValue?.let { cleanUserLabel(optionName) to it }
+                }
+
+                val fallbackRows = if (rows.isNotEmpty()) {
+                    rows
+                } else {
+                    dataElementValues.map { dataValue ->
+                        val optionName = optionMap.entries.firstOrNull { (_, comboUid) ->
+                            comboUid == dataValue.categoryOptionCombo
+                        }?.key?.firstOrNull()?.let { uid ->
+                            optionNameByUid[uid]
+                        } ?: cleanUserLabel(dataValue.categoryOptionComboName)
+                        optionName to dataValue
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    fallbackRows.forEach { (optionName, dataValue) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = cleanUserLabel(optionName).ifBlank { "Value" },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(0.38f)
+                            )
+                            Box(modifier = Modifier.weight(0.62f)) {
+                                DataValueField(
+                                    dataValue = dataValue,
+                                    onValueChange = { value -> onValueChange(value, dataValue) },
+                                    viewModel = viewModel,
+                                    showLabel = false,
+                                    compact = true
+                                )
+                            }
+                        }
+                    }
+                }
             } else {
                 // Has category combo - render nested category accordions
                 CategoryAccordionRecursive(
@@ -1317,6 +1388,193 @@ fun CategoryAccordionRecursive(
             }
             return
         }
+    }
+
+    // For 3+ categories, use first category as selector (dropdown),
+    // then render a matrix for the remaining categories when possible.
+    var effectiveCategories = categories
+    var effectiveParentPath = parentPath
+    var selectedPrefixLabel: String? = null
+    if (categories.size >= 3 && categories.first().second.size > 1) {
+        val selectorCategory = categories.first()
+        var selectorExpanded by remember(parentPath, categories) { mutableStateOf(false) }
+        var selectedSelectorUid by remember(parentPath, categories) {
+            mutableStateOf(selectorCategory.second.firstOrNull()?.first.orEmpty())
+        }
+        val selectedSelectorName = selectorCategory.second
+            .firstOrNull { it.first == selectedSelectorUid }
+            ?.second
+            .orEmpty()
+
+        ExposedDropdownMenuBox(
+            expanded = selectorExpanded,
+            onExpandedChange = { selectorExpanded = !selectorExpanded }
+        ) {
+            OutlinedTextField(
+                value = cleanUserLabel(selectedSelectorName).ifBlank { "Select" },
+                onValueChange = {},
+                readOnly = true,
+                label = { Text(selectorCategory.first) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = selectorExpanded) },
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = selectorExpanded,
+                onDismissRequest = { selectorExpanded = false }
+            ) {
+                selectorCategory.second.forEach { (uid, name) ->
+                    DropdownMenuItem(
+                        text = { Text(name) },
+                        onClick = {
+                            selectedSelectorUid = uid
+                            selectorExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (selectedSelectorUid.isNotBlank()) {
+            effectiveCategories = categories.drop(1)
+            effectiveParentPath = parentPath + selectedSelectorUid
+            selectedPrefixLabel = selectedSelectorName
+        }
+    }
+
+    // Generalized matrix rendering for 2+ categories:
+    // choose one category as row axis and use cartesian product of remaining
+    // categories as column axis, when column count remains reasonable.
+    if (effectiveCategories.size >= 2) {
+        val rowCategoryIndex = effectiveCategories.indices.maxByOrNull { effectiveCategories[it].second.size } ?: 0
+        val rowCategory = effectiveCategories[rowCategoryIndex]
+        val columnCategories = effectiveCategories.filterIndexed { index, _ -> index != rowCategoryIndex }
+
+        fun cartesianOptions(
+            input: List<Pair<String, List<Pair<String, String>>>>
+        ): List<Pair<Set<String>, String>> {
+            if (input.isEmpty()) return listOf(emptySet<String>() to "")
+            var acc: List<Pair<Set<String>, String>> = listOf(emptySet<String>() to "")
+            input.forEach { (_, options) ->
+                acc = acc.flatMap { (uids, label) ->
+                    options.map { (optionUid, optionName) ->
+                        val nextUids = uids + optionUid
+                        val nextLabel = if (label.isBlank()) optionName else "$label / $optionName"
+                        nextUids to nextLabel
+                    }
+                }
+            }
+            return acc
+        }
+
+        val columnCombos = cartesianOptions(columnCategories)
+        val rowCount = rowCategory.second.size
+        val columnCount = columnCombos.size
+
+        if (rowCount >= 2 && columnCount in 2..6) {
+            val valuesByComboUid = values.associateBy { it.categoryOptionCombo }
+            val formDimensions = LocalFormDimensions.current
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(formDimensions.sectionCornerRadius)
+                    )
+                    .padding(8.dp)
+            ) {
+                DataEntryGridHeader(
+                    columnTitles = columnCombos.map { it.second.ifBlank { "Value" } },
+                    rowHeaderTitle = selectedPrefixLabel?.let { "$it / ${rowCategory.first}" } ?: rowCategory.first
+                )
+
+                rowCategory.second.forEachIndexed { index, (rowUid, rowName) ->
+                    val cells = columnCombos.map { (columnUidSet, columnLabel) ->
+                        val allUids = optionOnlyPath(effectiveParentPath + rowUid) + columnUidSet
+                        val comboUid = optionUidsToComboUid[allUids]
+                        val dataValue = comboUid?.let { valuesByComboUid[it] }
+                        GridCellData(columnTitle = columnLabel, dataValue = dataValue)
+                    }
+                    DataEntryGridRow(
+                        rowTitle = rowName,
+                        cells = cells,
+                        rowIndex = index,
+                        onValueChange = onValueChange,
+                        viewModel = viewModel,
+                        enabled = true
+                    )
+                }
+            }
+            return
+        }
+    }
+
+    // Flatten multi-level category combinations into left-label/right-input rows
+    // to reduce taps and avoid deep nested accordions.
+    val valuesByComboUid = values.associateBy { it.categoryOptionCombo }
+    fun collectCategoryRows(
+        level: Int,
+        path: List<String>,
+        labels: List<String>
+    ): List<CategoryPathRow> {
+        if (level >= effectiveCategories.size) {
+            val comboUid = optionUidsToComboUid[optionOnlyPath(path)]
+            val dataValue = comboUid?.let { valuesByComboUid[it] } ?: return emptyList()
+            val baseLabel = cleanUserLabel(labels.joinToString(" / "))
+                .ifBlank { cleanUserLabel(dataValue.categoryOptionComboName) }
+            val label = cleanUserLabel(selectedPrefixLabel?.let { "$it / $baseLabel" } ?: baseLabel)
+            return listOf(CategoryPathRow(label = label, dataValue = dataValue))
+        }
+
+        val (_, options) = effectiveCategories[level]
+        return options.flatMap { (optionUid, optionName) ->
+            collectCategoryRows(
+                level = level + 1,
+                path = path + optionUid,
+                labels = labels + optionName
+            )
+        }
+    }
+
+    val flattenedRows = collectCategoryRows(
+        level = 0,
+        path = effectiveParentPath,
+        labels = emptyList()
+    )
+    if (flattenedRows.isNotEmpty()) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            flattenedRows.forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = cleanUserLabel(row.label).ifBlank { "Value" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(0.38f)
+                    )
+                    Box(modifier = Modifier.weight(0.62f)) {
+                        DataValueField(
+                            dataValue = row.dataValue,
+                            onValueChange = { value -> onValueChange(value, row.dataValue) },
+                            viewModel = viewModel,
+                            showLabel = false,
+                            compact = true
+                        )
+                    }
+                }
+            }
+        }
+        return
     }
 
     if (restCategories.isEmpty()) {

@@ -542,18 +542,11 @@ class MetadataCacheService @Inject constructor(
 
         Log.d("MetadataCacheService", "Pre-fetching data values for dataset: $datasetId")
 
-        // First check if we have cached data in Room
+        // Keep a snapshot of Room cache as fallback only.
         val cachedDataValues = dataValueDao.getValuesForInstance(datasetId, period, orgUnit, attributeOptionCombo)
 
-        if (cachedDataValues.isNotEmpty()) {
-            Log.d("MetadataCacheService", "Using cached data values from Room: ${cachedDataValues.size} entries")
-
-            // For cached data, we'll return empty map and let the DataEntryRepositoryImpl
-            // handle retrieving data from Room cache directly - this avoids complex SDK mocking
-            return emptyMap()
-        }
-
-        // If no cached data, fetch fresh data values from SDK
+        // Always read from SDK local store first. This reflects latest downloaded server values
+        // and avoids stale/partial Room snapshots masking existing web data.
         val rawSdkDataValues = d2.dataValueModule().dataValues()
             .byDataSetUid(datasetId)
             .byPeriod().eq(period)
@@ -563,12 +556,20 @@ class MetadataCacheService @Inject constructor(
 
         Log.d("MetadataCacheService", "Raw SDK data values retrieved: ${rawSdkDataValues.size}")
 
+        if (rawSdkDataValues.isEmpty()) {
+            Log.d(
+                "MetadataCacheService",
+                "No SDK values for instance; using Room fallback entries=${cachedDataValues.size}"
+            )
+            return emptyMap()
+        }
+
         // Map using the actual keys from SDK data - this fixes the key mismatch issue
         val mappedDataValues = rawSdkDataValues.associateBy {
             (it.dataElement() ?: "") to (it.categoryOptionCombo() ?: "")
         }
 
-        // Store in Room for quick subsequent loading
+        // Keep app Room mirror aligned with SDK local storage.
         storeDataValuesInRoom(datasetId, period, orgUnit, attributeOptionCombo, rawSdkDataValues)
 
         Log.d("MetadataCacheService", "Data values mapped and cached: ${mappedDataValues.size} entries")

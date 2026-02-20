@@ -335,7 +335,7 @@ class DataEntryRepositoryImpl @Inject constructor(
                         dataElementName = dataElementName,
                         sectionName = section.name,
                         categoryOptionCombo = "",
-                        categoryOptionComboName = "Default",
+                        categoryOptionComboName = "",
                         value = finalValue, // Draft > SDK > cached
                         comment = draft?.comment ?: cached?.comment,
                         storedBy = null, // Cached data doesn't store storedBy info
@@ -445,7 +445,7 @@ class DataEntryRepositoryImpl @Inject constructor(
                 .find { section ->
                     section.dataElements()?.any { it.uid() == dataElement } == true
                 }
-                ?.displayName() ?: "Default Section"
+                ?.displayName() ?: "General Section"
 
             val categoryOptionComboName = if (categoryOptionCombo.isNotEmpty()) {
                 d2.categoryModule().categoryOptionCombos()
@@ -453,7 +453,7 @@ class DataEntryRepositoryImpl @Inject constructor(
                     .blockingGet()
                     ?.displayName() ?: categoryOptionCombo
             } else {
-                "Default"
+                ""
             }
 
             // Get value history
