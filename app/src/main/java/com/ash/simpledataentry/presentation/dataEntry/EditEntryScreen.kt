@@ -1395,11 +1395,31 @@ fun CategoryAccordionRecursive(
     var effectiveCategories = categories
     var effectiveParentPath = parentPath
     var selectedPrefixLabel: String? = null
-    if (categories.size >= 3 && categories.first().second.size > 1) {
-        val selectorCategory = categories.first()
+    if (categories.size >= 3) {
+        val selectorCategoryIndex = categories.indices.maxByOrNull { categories[it].second.size } ?: 0
+        val selectorCategory = categories[selectorCategoryIndex]
+        val valuesByComboUid = values.associateBy { it.categoryOptionCombo }
+        fun nonEmptyCountForSelectorOption(optionUid: String): Int {
+            val comboUids = optionUidsToComboUid
+                .filterKeys { keySet -> keySet.contains(optionUid) }
+                .values
+                .distinct()
+            return comboUids.count { comboUid ->
+                val value = valuesByComboUid[comboUid]?.value
+                !value.isNullOrBlank()
+            }
+        }
+        val bestSelectorUid = selectorCategory.second
+            .maxByOrNull { (uid, _) -> nonEmptyCountForSelectorOption(uid) }
+            ?.first
+            .orEmpty()
+
         var selectorExpanded by remember(parentPath, categories) { mutableStateOf(false) }
         var selectedSelectorUid by remember(parentPath, categories) {
-            mutableStateOf(selectorCategory.second.firstOrNull()?.first.orEmpty())
+            mutableStateOf(
+                if (bestSelectorUid.isNotBlank()) bestSelectorUid
+                else selectorCategory.second.firstOrNull()?.first.orEmpty()
+            )
         }
         val selectedSelectorName = selectorCategory.second
             .firstOrNull { it.first == selectedSelectorUid }
@@ -1438,7 +1458,7 @@ fun CategoryAccordionRecursive(
         Spacer(modifier = Modifier.height(8.dp))
 
         if (selectedSelectorUid.isNotBlank()) {
-            effectiveCategories = categories.drop(1)
+            effectiveCategories = categories.filterIndexed { index, _ -> index != selectorCategoryIndex }
             effectiveParentPath = parentPath + selectedSelectorUid
             selectedPrefixLabel = selectedSelectorName
         }

@@ -21,6 +21,7 @@ import javax.inject.Singleton
 import androidx.core.content.edit
 import com.ash.simpledataentry.data.local.AppDatabase
 import com.ash.simpledataentry.data.sync.BackgroundSyncManager
+import com.ash.simpledataentry.data.sync.D2SdkOperationLocks
 import com.ash.simpledataentry.presentation.core.NavigationProgress
 import com.ash.simpledataentry.presentation.core.LoadingPhase
 import okhttp3.OkHttpClient
@@ -1102,7 +1103,11 @@ class SessionManager @Inject constructor(
 
         try {
             Log.d("SessionManager", "Downloading aggregate data...")
-            d2Instance.aggregatedModule().data().blockingDownload()
+            runBlocking {
+                D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                    d2Instance.aggregatedModule().data().blockingDownload()
+                }
+            }
             Log.d("SessionManager", "Aggregate data download complete")
         } catch (e: Exception) {
             Log.e("SessionManager", "AGGREGATE: Data download failed", e)
@@ -1612,9 +1617,13 @@ class SessionManager @Inject constructor(
             val programUid = program.uid()
             Log.d("SessionManager", "Downloading tracker data for: ${program.displayName()}")
             try {
-                d2Instance.trackedEntityModule().trackedEntityInstanceDownloader()
-                    .byProgramUid(programUid)
-                    .blockingDownload()
+                runBlocking {
+                    D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                        d2Instance.trackedEntityModule().trackedEntityInstanceDownloader()
+                            .byProgramUid(programUid)
+                            .blockingDownload()
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("SessionManager", "Failed to download tracker data for ${program.displayName()}: ${e.message}")
             }
@@ -1631,9 +1640,13 @@ class SessionManager @Inject constructor(
             val programUid = program.uid()
             Log.d("SessionManager", "Downloading event data for: ${program.displayName()}")
             try {
-                d2Instance.eventModule().eventDownloader()
-                    .byProgramUid(programUid)
-                    .blockingDownload()
+                runBlocking {
+                    D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                        d2Instance.eventModule().eventDownloader()
+                            .byProgramUid(programUid)
+                            .blockingDownload()
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("SessionManager", "Failed to download event data for ${program.displayName()}: ${e.message}")
             }
@@ -1642,7 +1655,11 @@ class SessionManager @Inject constructor(
         // 3. Download Standalone Events (no program)
         try {
             Log.d("SessionManager", "Downloading standalone events...")
-            d2Instance.eventModule().eventDownloader().download()
+            runBlocking {
+                D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                    d2Instance.eventModule().eventDownloader().download()
+                }
+            }
         } catch (e: Exception) {
             Log.e("SessionManager", "Failed to download standalone events: ${e.message}")
         }

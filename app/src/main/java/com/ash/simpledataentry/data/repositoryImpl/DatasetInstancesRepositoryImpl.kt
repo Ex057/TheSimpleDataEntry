@@ -14,9 +14,11 @@ import kotlinx.coroutines.rx2.await
 import com.ash.simpledataentry.data.SessionManager
 import com.ash.simpledataentry.data.DatabaseProvider
 import com.ash.simpledataentry.data.local.DraftInstanceSummary
+import com.ash.simpledataentry.data.sync.D2SdkOperationLocks
 import org.hisp.dhis.android.core.D2
 import org.hisp.dhis.android.core.organisationunit.OrganisationUnit
 import javax.inject.Inject
+import kotlinx.coroutines.sync.withLock
 
 private const val TAG = "DatasetInstancesRepo"
 
@@ -215,7 +217,11 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                     )
                     val setStartMs = android.os.SystemClock.elapsedRealtime()
                     Log.d(TAG, "[$attemptId] calling dataSetCompleteRegistrations.value(...).blockingSet()")
-                    d2.dataSetModule().dataSetCompleteRegistrations().value(period,orgUnit,datasetId,attributeOptionCombo).blockingSet()
+                    D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                        d2.dataSetModule().dataSetCompleteRegistrations()
+                            .value(period, orgUnit, datasetId, attributeOptionCombo)
+                            .blockingSet()
+                    }
                     Log.d(
                         TAG,
                         "[$attemptId] blockingSet success in ${android.os.SystemClock.elapsedRealtime() - setStartMs}ms"
@@ -223,7 +229,9 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
 
                     val uploadStartMs = android.os.SystemClock.elapsedRealtime()
                     Log.d(TAG, "[$attemptId] calling dataSetCompleteRegistrations().blockingUpload()")
-                    d2.dataSetModule().dataSetCompleteRegistrations().blockingUpload()
+                    D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                        d2.dataSetModule().dataSetCompleteRegistrations().blockingUpload()
+                    }
                     Log.d(
                         TAG,
                         "[$attemptId] blockingUpload success in ${android.os.SystemClock.elapsedRealtime() - uploadStartMs}ms"
@@ -327,9 +335,12 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
         return withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Marking dataset as incomplete: $datasetId, $period, $orgUnit, $attributeOptionCombo")
-                d2.dataSetModule().dataSetCompleteRegistrations()
-                    .value(period, orgUnit, datasetId, attributeOptionCombo).blockingDeleteIfExist()
-                d2.dataSetModule().dataSetCompleteRegistrations().blockingUpload()
+                D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                    d2.dataSetModule().dataSetCompleteRegistrations()
+                        .value(period, orgUnit, datasetId, attributeOptionCombo)
+                        .blockingDeleteIfExist()
+                    d2.dataSetModule().dataSetCompleteRegistrations().blockingUpload()
+                }
                 Log.d(TAG, "Dataset marked as incomplete successfully.")
                 Result.success(Unit)
             } catch (e: Exception) {
@@ -366,6 +377,87 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
             }
 
             Log.d(TAG, "User authenticated: ${user.uid()}")
+
+            // STEP 0: Upload local tracker changes before downloading
+            Log.d(TAG, "STEP 0: Uploading local tracker changes before download...")
+            val localTeisBeforeUpload = d2.trackedEntityModule().trackedEntityInstances()
+                .byProgramUids(listOf(programId))
+                .get().await()
+            val localEnrollmentsBeforeUpload = d2.enrollmentModule().enrollments()
+                .byProgram().eq(programId)
+                .get().await()
+            val localEventsBeforeUpload = d2.eventModule().events()
+                .byProgramUid().eq(programId)
+                .get().await()
+            val pendingTeisBefore = localTeisBeforeUpload.count {
+                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR
+            }
+            val pendingEnrollmentsBefore = localEnrollmentsBeforeUpload.count {
+                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR
+            }
+            val pendingEventsBefore = localEventsBeforeUpload.count {
+                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR
+            }
+            Log.d(
+                TAG,
+                "TRACKER SYNC: pending before upload teis=$pendingTeisBefore enrollments=$pendingEnrollmentsBefore events=$pendingEventsBefore"
+            )
+            d2.trackedEntityModule().trackedEntityInstances().blockingUpload()
+            // SDK 1.13.1 uploads tracker payloads (TEIs + enrollments + nested tracker events)
+            // through the TEI upload endpoint; EnrollmentCollectionRepository has no blockingUpload().
+            d2.eventModule().events()
+                .byProgramUid().eq(programId)
+                .blockingUpload()
+            val localTeisAfterUpload = d2.trackedEntityModule().trackedEntityInstances()
+                .byProgramUids(listOf(programId))
+                .get().await()
+            val localEnrollmentsAfterUpload = d2.enrollmentModule().enrollments()
+                .byProgram().eq(programId)
+                .get().await()
+            val localEventsAfterUpload = d2.eventModule().events()
+                .byProgramUid().eq(programId)
+                .get().await()
+            val pendingTeisAfter = localTeisAfterUpload.count {
+                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR
+            }
+            val pendingEnrollmentsAfter = localEnrollmentsAfterUpload.count {
+                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR
+            }
+            val pendingEventsAfter = localEventsAfterUpload.count {
+                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE ||
+                    it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR
+            }
+            Log.d(
+                TAG,
+                "TRACKER SYNC: pending after upload teis=$pendingTeisAfter enrollments=$pendingEnrollmentsAfter events=$pendingEventsAfter"
+            )
+            localTeisAfterUpload
+                .filter { it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR }
+                .forEach { tei ->
+                    Log.w(
+                        TAG,
+                        "TRACKER SYNC: TEI ERROR after upload tei=${tei.uid()} orgUnit=${tei.organisationUnit()} sync=${tei.aggregatedSyncState()}"
+                    )
+                }
+            localEnrollmentsAfterUpload
+                .filter { it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR }
+                .forEach { enrollment ->
+                    Log.w(
+                        TAG,
+                        "TRACKER SYNC: ENROLLMENT ERROR after upload enrollment=${enrollment.uid()} tei=${enrollment.trackedEntityInstance()} orgUnit=${enrollment.organisationUnit()} status=${enrollment.status()} sync=${enrollment.aggregatedSyncState()}"
+                    )
+                }
 
             // STEP 1: Ensure tracker-specific metadata is complete
             Log.d(TAG, "STEP 1: Ensuring tracker metadata is complete...")
@@ -404,9 +496,9 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
             val downloader = d2.trackedEntityModule().trackedEntityInstanceDownloader()
                 .byProgramUid(programId)
 
-            // Execute download
-            val downloadResult = downloader.download()
-            Log.d(TAG, "Tracker download completed with result: $downloadResult")
+            // Execute download (blocking). `download()` returns Rx type in this SDK version.
+            downloader.blockingDownload()
+            Log.d(TAG, "Tracker download completed")
 
             // STEP 5: Post-download validation and foreign key violation resolution
             Log.d(TAG, "STEP 5: Post-download validation...")
@@ -431,6 +523,22 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                 .byProgramUid().eq(programId)
                 .get().await()
             Log.d(TAG, "Found ${storedEvents.size} Events in local storage")
+            storedEnrollments
+                .filter { it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR }
+                .forEach { enrollment ->
+                    Log.w(
+                        TAG,
+                        "TRACKER SYNC: ENROLLMENT ERROR after download enrollment=${enrollment.uid()} tei=${enrollment.trackedEntityInstance()} orgUnit=${enrollment.organisationUnit()} status=${enrollment.status()} sync=${enrollment.aggregatedSyncState()}"
+                    )
+                }
+            storedTEIs
+                .filter { it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.ERROR }
+                .forEach { tei ->
+                    Log.w(
+                        TAG,
+                        "TRACKER SYNC: TEI ERROR after download tei=${tei.uid()} orgUnit=${tei.organisationUnit()} sync=${tei.aggregatedSyncState()}"
+                    )
+                }
 
             // STEP 7: Additional diagnostics if no data was stored despite successful API call
             if (storedTEIs.isEmpty() && storedEnrollments.isEmpty()) {
@@ -604,6 +712,32 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                     com.ash.simpledataentry.domain.model.ProgramType.EVENT -> {
                         // Sync events - download from server
                         Log.d(TAG, "=== EVENT DATA SYNC START for program: $programId ===")
+                        val beforeSyncStates = d2.eventModule().events()
+                            .byProgramUid().eq(programId)
+                            .get().await()
+                        val pendingBefore = beforeSyncStates.count {
+                            it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE
+                        }
+                        Log.d(TAG, "EVENT SYNC: before upload local events=${beforeSyncStates.size}, pendingUpload=$pendingBefore")
+                        if (pendingBefore > 0) {
+                            Log.d(TAG, "EVENT SYNC: Uploading pending events for program $programId...")
+                            d2.eventModule().events()
+                                .byProgramUid().eq(programId)
+                                .blockingUpload()
+                            Log.d(TAG, "EVENT SYNC: Event upload completed")
+                        } else {
+                            Log.d(TAG, "EVENT SYNC: No pending local event changes to upload")
+                        }
+
+                        val afterUploadStates = d2.eventModule().events()
+                            .byProgramUid().eq(programId)
+                            .get().await()
+                        val pendingAfterUpload = afterUploadStates.count {
+                            it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE
+                        }
+                        Log.d(TAG, "EVENT SYNC: after upload pendingUpload=$pendingAfterUpload")
 
                         // First ensure metadata is up to date
                         d2.metadataModule().blockingDownload()
@@ -622,8 +756,17 @@ class DatasetInstancesRepositoryImpl @Inject constructor(
                         Log.d(TAG, "EVENT SYNC: Found ${storedEvents.size} events in local storage for program $programId")
 
                         storedEvents.forEach { event ->
-                            Log.d(TAG, "EVENT SYNC: - Event ${event.uid()}: status=${event.status()}, orgUnit=${event.organisationUnit()}, date=${event.eventDate()}")
+                            Log.d(
+                                TAG,
+                                "EVENT SYNC: - Event ${event.uid()}: status=${event.status()}, sync=${event.aggregatedSyncState()}, orgUnit=${event.organisationUnit()}, date=${event.eventDate()}"
+                            )
                         }
+
+                        val pendingAfter = storedEvents.count {
+                            it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_POST ||
+                                it.aggregatedSyncState() == org.hisp.dhis.android.core.common.State.TO_UPDATE
+                        }
+                        Log.d(TAG, "EVENT SYNC: after download pendingUpload=$pendingAfter")
 
                         // PHASE 2: Populate Room cache after successful SDK sync
                         Log.d(TAG, "EVENT SYNC: Populating Room cache...")

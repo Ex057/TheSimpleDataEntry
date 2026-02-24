@@ -6,6 +6,7 @@ import com.ash.simpledataentry.data.local.DatasetDao
 import com.ash.simpledataentry.data.SessionManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -122,20 +123,20 @@ class BackgroundDataPrefetcher @Inject constructor(
             }
 
             prefetchJobs.chunked(10).forEach { batch ->
-                coroutineScope {
-                    batch.map { (datasetId, period, orgUnit) ->
-                        async(Dispatchers.IO) {
-                            try {
-                                d2Instance.dataValueModule().dataValues()
-                                    .byDataSetUid(datasetId)
-                                    .byPeriod().eq(period.periodId())
-                                    .byOrganisationUnitUid().eq(orgUnit.uid())
-                                    .blockingGet()
-                            } catch (e: Exception) {
-                                Log.w("BackgroundDataPrefetcher", "Failed to prefetch data for dataset $datasetId, period ${period.periodId()}", e)
-                            }
+                // Run sequentially under the shared SDK lock to avoid nested SQLite transactions
+                // while foreground sync/upload is active.
+                for ((datasetId, period, orgUnit) in batch) {
+                    try {
+                        D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                            d2Instance.dataValueModule().dataValues()
+                                .byDataSetUid(datasetId)
+                                .byPeriod().eq(period.periodId())
+                                .byOrganisationUnitUid().eq(orgUnit.uid())
+                                .blockingGet()
                         }
-                    }.awaitAll()
+                    } catch (e: Exception) {
+                        Log.w("BackgroundDataPrefetcher", "Failed to prefetch data for dataset $datasetId, period ${period.periodId()}", e)
+                    }
                 }
                 delay(50)
             }

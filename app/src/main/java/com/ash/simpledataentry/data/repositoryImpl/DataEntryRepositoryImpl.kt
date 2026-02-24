@@ -24,8 +24,10 @@ import com.ash.simpledataentry.util.NetworkUtils
 import com.ash.simpledataentry.data.local.DataValueEntity
 import com.ash.simpledataentry.data.local.DataValueDao
 import com.ash.simpledataentry.data.cache.MetadataCacheService
+import com.ash.simpledataentry.data.sync.D2SdkOperationLocks
 import com.ash.simpledataentry.data.sync.NetworkStateManager
 import com.ash.simpledataentry.data.sync.SyncQueueManager
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import kotlin.Pair
 import kotlin.Result
@@ -177,7 +179,10 @@ class DataEntryRepositoryImpl @Inject constructor(
         orgUnit: String,
         attributeOptionCombo: String
     ): Flow<List<DataValue>> = flow {
-        Log.d("DataEntryRepositoryImpl", "Starting optimized getDataValues for dataset: $datasetId")
+        Log.d(
+            "DataEntryRepositoryImpl",
+            "DVTRACE getDataValues start dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo"
+        )
         
         // OFFLINE-FIRST APPROACH: Always use cached data for instant loading
         // Only fetch fresh data during explicit sync operations, not on screen loads
@@ -214,7 +219,55 @@ class DataEntryRepositoryImpl @Inject constructor(
         }
         
         // Get metadata from cache with pre-fetched data values (fast)
-        val optimizedData = metadataCacheService.getOptimizedDataForEntry(datasetId, period, orgUnit, attributeOptionCombo)
+        var optimizedData = metadataCacheService.getOptimizedDataForEntry(datasetId, period, orgUnit, attributeOptionCombo)
+        Log.d(
+            "DataEntryRepositoryImpl",
+            "DVTRACE sourceCounts dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo drafts=${draftMap.size} room=${cachedDataValues.size} sdk=${optimizedData.sdkDataValues.size}"
+        )
+        if (cachedDataValues.isNotEmpty()) {
+            cachedDataValues.entries.take(5).forEach { (key, dv) ->
+                Log.d(
+                    "DataEntryRepositoryImpl",
+                    "DVTRACE roomSample de=${key.first} coc=${key.second} value=${dv.value}"
+                )
+            }
+        }
+        if (optimizedData.sdkDataValues.isNotEmpty()) {
+            optimizedData.sdkDataValues.entries.take(5).forEach { (key, dv) ->
+                Log.d(
+                    "DataEntryRepositoryImpl",
+                    "DVTRACE sdkSample de=${key.first} coc=${key.second} value=${dv.value()}"
+                )
+            }
+        }
+        if (optimizedData.sdkDataValues.isEmpty() && cachedDataValues.isNotEmpty()) {
+            Log.w(
+                "DataEntryRepositoryImpl",
+                "DVTRACE mismatch: room has ${cachedDataValues.size} values but optimized SDK snapshot is empty for dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo"
+            )
+        }
+        if (optimizedData.sdkDataValues.isNotEmpty() && cachedDataValues.isEmpty()) {
+            Log.w(
+                "DataEntryRepositoryImpl",
+                "DVTRACE mismatch: optimized SDK snapshot has ${optimizedData.sdkDataValues.size} values but Room cache is empty for dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo"
+            )
+        }
+
+        if (optimizedData.sdkDataValues.isEmpty() && cachedDataValues.isEmpty() && draftMap.isEmpty() && !isOffline) {
+            try {
+                val refreshed = metadataCacheService.refreshDataValues(datasetId, period, orgUnit, attributeOptionCombo)
+                Log.d("DataEntryRepositoryImpl", "Empty state detected; triggered server refresh and fetched $refreshed values")
+                if (refreshed > 0) {
+                    optimizedData = metadataCacheService.getOptimizedDataForEntry(datasetId, period, orgUnit, attributeOptionCombo)
+                    Log.d(
+                        "DataEntryRepositoryImpl",
+                        "DVTRACE afterEmptyRefresh sdk=${optimizedData.sdkDataValues.size}"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w("DataEntryRepositoryImpl", "Server refresh on empty form failed: ${e.message}")
+            }
+        }
 
         Log.d("DataEntryRepositoryImpl", "Fresh SDK data loaded: ${optimizedData.sdkDataValues.size} values")
 
@@ -373,7 +426,17 @@ class DataEntryRepositoryImpl @Inject constructor(
             sectionResults
         }
         
-        Log.d("DataEntryRepositoryImpl", "Loaded ${mappedDataValues.size} data values from cache (instant loading)")
+        val nonEmptyFinalValues = mappedDataValues.count { !it.value.isNullOrBlank() }
+        Log.d(
+            "DataEntryRepositoryImpl",
+            "DVTRACE emit mapped=${mappedDataValues.size} nonEmpty=$nonEmptyFinalValues dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo"
+        )
+        mappedDataValues.filter { !it.value.isNullOrBlank() }.take(5).forEach { dv ->
+            Log.d(
+                "DataEntryRepositoryImpl",
+                "DVTRACE finalSample de=${dv.dataElement} coc=${dv.categoryOptionCombo} value=${dv.value}"
+            )
+        }
         emit(mappedDataValues)
     }
 
@@ -393,7 +456,9 @@ class DataEntryRepositoryImpl @Inject constructor(
 
             if (value != null) {
                 try {
-                    dataValueObjectRepository.blockingSet(value)
+                    D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                        dataValueObjectRepository.blockingSet(value)
+                    }
 //                    if (comment != null) {
 //                        dataValueObjectRepository.blockingSetComment(comment)
 //                    }
@@ -418,7 +483,9 @@ class DataEntryRepositoryImpl @Inject constructor(
                     throw e
                 }
             } else {
-                dataValueObjectRepository.blockingDeleteIfExist()
+                D2SdkOperationLocks.dataValueAndAggregateMutex.withLock {
+                    dataValueObjectRepository.blockingDeleteIfExist()
+                }
                 // Also remove draft if value is deleted
                 draftDao.deleteDraft(datasetId, period, orgUnit, attributeOptionCombo, dataElement, categoryOptionCombo)
                 Log.d("DataEntryRepositoryImpl", "Deleted value and removed from draft queue")
@@ -780,7 +847,16 @@ class DataEntryRepositoryImpl @Inject constructor(
         orgUnit: String,
         attributeOptionCombo: String
     ): Int {
-        return metadataCacheService.refreshDataValues(datasetId, period, orgUnit, attributeOptionCombo)
+        Log.d(
+            "DataEntryRepositoryImpl",
+            "DVTRACE refreshDataValues request dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo"
+        )
+        val refreshed = metadataCacheService.refreshDataValues(datasetId, period, orgUnit, attributeOptionCombo)
+        Log.d(
+            "DataEntryRepositoryImpl",
+            "DVTRACE refreshDataValues result dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo refreshed=$refreshed"
+        )
+        return refreshed
     }
 
     override suspend fun hasCachedDataValues(
@@ -790,7 +866,12 @@ class DataEntryRepositoryImpl @Inject constructor(
         attributeOptionCombo: String
     ): Boolean {
         return withContext(Dispatchers.IO) {
-            dataValueDao.getValuesForInstance(datasetId, period, orgUnit, attributeOptionCombo).isNotEmpty()
+            val count = dataValueDao.getValuesForInstance(datasetId, period, orgUnit, attributeOptionCombo).size
+            Log.d(
+                "DataEntryRepositoryImpl",
+                "DVTRACE hasCachedDataValues dataset=$datasetId period=$period orgUnit=$orgUnit aoc=$attributeOptionCombo count=$count"
+            )
+            count > 0
         }
     }
 

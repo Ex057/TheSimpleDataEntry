@@ -300,6 +300,10 @@ class DataEntryViewModel @Inject constructor(
                     attributeOptionCombos = attributeOptionCombos
                 )
                 logStage("Resolved attribute option combo")
+                Log.d(
+                    TAG,
+                    "DVTRACE loadDataValues request dataset=$datasetId period=$period orgUnit=$orgUnitId preferredAOC=$attributeOptionCombo resolvedAOC=$resolvedAttributeOptionCombo"
+                )
                 val editabilityDeferred = async {
                     resolveDatasetEditability(
                         datasetId = datasetId,
@@ -486,6 +490,27 @@ class DataEntryViewModel @Inject constructor(
                             }
                         } ?: fetched
                     }
+                    val fetchedNonEmpty = values.count { !it.value.isNullOrBlank() }
+                    val mergedNonEmpty = mergedValues.count { !it.value.isNullOrBlank() }
+                    Log.d(
+                        TAG,
+                        "DVTRACE loadEmission dataset=$datasetId period=$period orgUnit=$orgUnitId aoc=$resolvedAttributeOptionCombo fetched=${values.size} fetchedNonEmpty=$fetchedNonEmpty drafts=${draftMap.size} merged=${mergedValues.size} mergedNonEmpty=$mergedNonEmpty"
+                    )
+                    mergedValues.filter { !it.value.isNullOrBlank() }.take(5).forEach { dv ->
+                        Log.d(
+                            TAG,
+                            "DVTRACE uiSample de=${dv.dataElement} coc=${dv.categoryOptionCombo} value=${dv.value}"
+                        )
+                    }
+
+                    // Rehydrate input field state from latest loaded values.
+                    // Without this, previously initialized empty TextFieldValue entries can mask
+                    // freshly downloaded server values after sync/reload.
+                    _fieldStates.value = mergedValues.associate { dataValue ->
+                        fieldKey(dataValue.dataElement, dataValue.categoryOptionCombo) to
+                            androidx.compose.ui.text.input.TextFieldValue(dataValue.value ?: "")
+                    }
+
                     val valuesByCombo = mergedValues.groupBy { it.categoryOptionCombo }
                     val valuesByElement = mergedValues.groupBy { it.dataElement }
                     val metadataDisabledFields = resolveMetadataDisabledFields(
@@ -772,14 +797,35 @@ class DataEntryViewModel @Inject constructor(
             addAll(assignableCandidates.filter { it != preferredAttributeOptionCombo })
         }
 
-        for (comboUid in prioritizedCandidates) {
-            if (comboHasExistingData(datasetId, period, orgUnitId, comboUid)) {
-                Log.d(
-                    TAG,
-                    "Resolved attribute option combo with existing data: $comboUid (preferred=$preferredAttributeOptionCombo)"
-                )
-                return@withContext comboUid
+        val scoredCandidates: List<Pair<String, Int>> = prioritizedCandidates.map { comboUid: String ->
+            comboUid to comboExistingDataCount(
+                datasetId = datasetId,
+                period = period,
+                orgUnitId = orgUnitId,
+                attributeOptionComboUid = comboUid
+            )
+        }
+        val scoreText = scoredCandidates.joinToString(separator = ", ") { pair ->
+            "${pair.first}=${pair.second}"
+        }
+        Log.d(
+            TAG,
+            "Assignable AOC scores: $scoreText"
+        )
+
+        val maxCount = scoredCandidates.maxOfOrNull { it.second } ?: 0
+        if (maxCount > 0) {
+            val maxCandidates = scoredCandidates.filter { it.second == maxCount }.map { it.first }
+            val chosen = if (preferredAttributeOptionCombo.isNotBlank() && maxCandidates.contains(preferredAttributeOptionCombo)) {
+                preferredAttributeOptionCombo
+            } else {
+                maxCandidates.first()
             }
+            Log.d(
+                TAG,
+                "Resolved attribute option combo with highest data count: $chosen (count=$maxCount, preferred=$preferredAttributeOptionCombo)"
+            )
+            return@withContext chosen
         }
 
         val fallback = prioritizedCandidates.first()
@@ -787,30 +833,32 @@ class DataEntryViewModel @Inject constructor(
         fallback
     }
 
-    private suspend fun comboHasExistingData(
+    private suspend fun comboExistingDataCount(
         datasetId: String,
         period: String,
         orgUnitId: String,
         attributeOptionComboUid: String
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Int = withContext(Dispatchers.IO) {
         try {
-            if (repository.hasCachedDataValues(datasetId, period, orgUnitId, attributeOptionComboUid)) {
-                return@withContext true
-            }
             val networkState = networkStateManager.networkState.value
-            if (!networkState.isConnected || !networkState.hasInternet) {
-                return@withContext false
+            if (networkState.isConnected && networkState.hasInternet) {
+                val refreshedCount = repository.refreshDataValues(
+                    datasetId = datasetId,
+                    period = period,
+                    orgUnit = orgUnitId,
+                    attributeOptionCombo = attributeOptionComboUid
+                )
+                return@withContext refreshedCount
             }
-            val refreshedCount = repository.refreshDataValues(
-                datasetId = datasetId,
-                period = period,
-                orgUnit = orgUnitId,
-                attributeOptionCombo = attributeOptionComboUid
-            )
-            refreshedCount > 0
+
+            // Offline fallback: if cached exists, treat as present.
+            if (repository.hasCachedDataValues(datasetId, period, orgUnitId, attributeOptionComboUid)) {
+                return@withContext 1
+            }
+            0
         } catch (e: Exception) {
-            Log.w(TAG, "comboHasExistingData failed for $attributeOptionComboUid: ${e.message}")
-            false
+            Log.w(TAG, "comboExistingDataCount failed for $attributeOptionComboUid: ${e.message}")
+            0
         }
     }
 
@@ -1107,30 +1155,15 @@ class DataEntryViewModel @Inject constructor(
                         repository.syncCurrentEntryForm()
                     }
                     Log.d("DataEntryViewModel", "Data values uploaded successfully: $uploadResult")
-                    // Only delete drafts if uploadResult is not null/empty
-                    if (uploadResult != null && uploadResult.toString().isNotBlank()) {
-                        withContext(Dispatchers.IO) {
-                            draftDao.deleteDraftsForInstance(
-                                stateSnapshot.datasetId,
-                                stateSnapshot.period,
-                                stateSnapshot.orgUnit,
-                                stateSnapshot.attributeOptionCombo
-                            )
-                        }
-                        Log.d("DataEntryViewModel", "Drafts deleted after successful upload")
-                    } else {
-                        Log.e(
-                            "DataEntryViewModel",
-                            "Upload failed or returned empty result: $uploadResult"
+                    withContext(Dispatchers.IO) {
+                        draftDao.deleteDraftsForInstance(
+                            stateSnapshot.datasetId,
+                            stateSnapshot.period,
+                            stateSnapshot.orgUnit,
+                            stateSnapshot.attributeOptionCombo
                         )
-                        updateState {
-                            it.copy(
-                                isLoading = false,
-                                error = "Upload failed or returned empty result."
-                            )
-                        }
-                        return@launch
                     }
+                    Log.d("DataEntryViewModel", "Drafts deleted after successful upload")
                 } catch (e: Exception) {
                     Log.e("DataEntryViewModel", "Upload failed: ${'$'}{e.message}", e)
                     updateState {
@@ -1142,7 +1175,22 @@ class DataEntryViewModel @Inject constructor(
                     return@launch
                 }
 
-                // 4. Reload data values to refresh UI
+                // 4. Refresh SDK/server values into Room for this instance before reloading UI.
+                try {
+                    val refreshed = withContext(Dispatchers.IO) {
+                        repository.refreshDataValues(
+                            stateSnapshot.datasetId,
+                            stateSnapshot.period,
+                            stateSnapshot.orgUnit,
+                            stateSnapshot.attributeOptionCombo
+                        )
+                    }
+                    Log.d("DataEntryViewModel", "syncCurrentEntryForm post-upload refresh complete: $refreshed values")
+                } catch (e: Exception) {
+                    Log.w("DataEntryViewModel", "syncCurrentEntryForm post-upload refresh failed: ${'$'}{e.message}")
+                }
+
+                // 5. Reload data values to refresh UI
                 loadDataValues(
                     datasetId = _state.value.datasetId,
                     datasetName = _state.value.datasetName,
