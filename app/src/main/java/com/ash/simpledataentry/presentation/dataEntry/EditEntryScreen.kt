@@ -1885,7 +1885,9 @@ fun EditEntryScreen(
     }
     
     LaunchedEffect(state.isLoading) {
-        if (!state.isLoading) {
+        if (state.isLoading) {
+            isUIReady = false
+        } else {
             delay(300)
             isUIReady = true
         }
@@ -2186,10 +2188,35 @@ fun EditEntryScreen(
                         )
                     }
 
-                    val showFormContent = !state.isLoading && isUIReady
+                    val showFormContent = state.dataElementGroupedSections.isNotEmpty() && (isUIReady || state.isLoading)
                     when {
                         !showFormContent -> {
-                            Box(modifier = Modifier.weight(1f))
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                    modifier = Modifier.padding(horizontal = 24.dp)
+                                ) {
+                                    CircularProgressIndicator()
+                                    Text(
+                                        text = state.navigationProgress?.phaseDetail
+                                            ?.takeIf { it.isNotBlank() }
+                                            ?: "Loading form data...",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "Please wait while we prepare the dataset form.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                         state.dataValues.isEmpty() -> {
                             Text(

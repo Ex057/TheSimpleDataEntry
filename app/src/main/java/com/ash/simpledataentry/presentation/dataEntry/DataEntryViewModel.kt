@@ -337,7 +337,22 @@ class DataEntryViewModel @Inject constructor(
                         orgUnit = orgUnitId,
                         attributeOptionCombo = resolvedAttributeOptionCombo,
                         isEditMode = isEditMode,
-                        navigationProgress = initialProgress
+                        navigationProgress = initialProgress,
+                        dataValues = emptyList(),
+                        currentDataValue = null,
+                        totalSections = 0,
+                        dataElementGroupedSections = emptyMap(),
+                        dataElementsBySection = emptyMap(),
+                        valuesByCombo = emptyMap(),
+                        valuesByElement = emptyMap(),
+                        categoryComboStructures = emptyMap(),
+                        optionUidsToComboUid = emptyMap(),
+                        optionSets = emptyMap(),
+                        renderTypes = emptyMap(),
+                        radioButtonGroups = emptyMap(),
+                        checkboxGroups = emptyMap(),
+                        sectionGroupingStrategies = emptyMap(),
+                        dataElementOrdering = emptyMap()
                     )
                 }
                 setUiLoading(
@@ -528,6 +543,63 @@ class DataEntryViewModel @Inject constructor(
                         }
                     }
 
+                    val groupedBySection = mergedValues.groupBy { it.sectionName }
+                    val shellDataElementGroupedSections = groupedBySection.mapValues { (_, sectionValues) ->
+                        sectionValues.groupBy { it.dataElement }
+                    }
+                    val shellDataElementOrdering = groupedBySection.mapValues { (_, sectionValues) ->
+                        sectionValues
+                            .groupBy { it.dataElement }
+                            .keys
+                            .mapIndexed { index, dataElement -> dataElement to index }
+                            .toMap()
+                    }
+                    val shellDataElementsBySection = shellDataElementGroupedSections.mapValues { (sectionName, elementGroups) ->
+                        val ordering = shellDataElementOrdering[sectionName].orEmpty()
+                        elementGroups.map { (dataElement, dataValues) ->
+                            val name = dataValues.firstOrNull()?.dataElementName ?: dataElement
+                            dataElement to name
+                        }.sortedBy { (dataElement, _) -> ordering[dataElement] ?: Int.MAX_VALUE }
+                    }
+                    val shellTotalSections = groupedBySection.size
+                    val shellSectionIndex = if (shellTotalSections > 0) {
+                        when {
+                            _state.value.currentSectionIndex in 0 until shellTotalSections -> _state.value.currentSectionIndex
+                            _state.value.currentSectionIndex == -1 -> 0
+                            else -> (shellTotalSections - 1).coerceAtLeast(0)
+                        }
+                    } else {
+                        -1
+                    }
+                    updateState { currentState ->
+                        currentState.copy(
+                            dataValues = mergedValues,
+                            totalSections = shellTotalSections,
+                            currentSectionIndex = shellSectionIndex,
+                            currentDataValue = mergedValues.firstOrNull(),
+                            currentStep = 0,
+                            attributeOptionComboName = attributeOptionComboName,
+                            attributeOptionCombos = attributeOptionCombos,
+                            dataElementGroupedSections = shellDataElementGroupedSections,
+                            valuesByCombo = valuesByCombo,
+                            valuesByElement = valuesByElement,
+                            dataElementsBySection = shellDataElementsBySection,
+                            dataElementOrdering = shellDataElementOrdering,
+                            isEntryEditable = isEntryEditable,
+                            nonEditableReason = nonEditableReason,
+                            isCompleted = isCompleted,
+                            metadataDisabledFields = metadataDisabledFields,
+                            navigationProgress = com.ash.simpledataentry.presentation.core.NavigationProgress(
+                                phase = com.ash.simpledataentry.presentation.core.LoadingPhase.PROCESSING_DATA,
+                                overallPercentage = 62,
+                                phaseTitle = com.ash.simpledataentry.presentation.core.LoadingPhase.PROCESSING_DATA.title,
+                                phaseDetail = "Preparing form layout...",
+                                loadingType = com.ash.simpledataentry.presentation.core.StepLoadingType.ENTRY
+                            )
+                        )
+                    }
+                    logStage("Published shell form state: sections=$shellTotalSections values=${mergedValues.size}")
+
                     // Step 3.5: Load Option Sets (65-80%)
                     updateState {
                         it.copy(
@@ -572,8 +644,6 @@ class DataEntryViewModel @Inject constructor(
                             )
                         )
                     }
-
-                    val groupedBySection = mergedValues.groupBy { it.sectionName }
 
                     // Check singleton cache first to avoid expensive re-computation
                     // This cache persists across ViewModel lifecycle for optimal performance

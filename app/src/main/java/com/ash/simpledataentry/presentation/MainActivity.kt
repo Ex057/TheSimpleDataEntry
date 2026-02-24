@@ -8,7 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -98,19 +97,16 @@ class MainActivity : ComponentActivity() {
         setContent {
             val isRestoring by isRestoringSession.collectAsState()
             SimpleDataEntryTheme {
-                val isLightTheme = !isSystemInDarkTheme()
-                val barColor = if (isLightTheme) {
-                    MaterialTheme.colorScheme.surface
-                } else {
-                    MaterialTheme.colorScheme.primary
-                }
-                val useDarkIcons = isLightTheme && barColor.luminance() > 0.5f
-                SideEffect {
-                    window.statusBarColor = barColor.toArgb()
-                    window.navigationBarColor = barColor.toArgb()
-                    val insetsController = WindowInsetsControllerCompat(window, window.decorView)
-                    insetsController.isAppearanceLightStatusBars = useDarkIcons
-                    insetsController.isAppearanceLightNavigationBars = useDarkIcons
+                if (isRestoring) {
+                    val statusBarColor = MaterialTheme.colorScheme.surface
+                    val navigationBarColor = MaterialTheme.colorScheme.surface
+                    SideEffect {
+                        window.statusBarColor = statusBarColor.toArgb()
+                        window.navigationBarColor = navigationBarColor.toArgb()
+                        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+                        insetsController.isAppearanceLightStatusBars = statusBarColor.luminance() > 0.5f
+                        insetsController.isAppearanceLightNavigationBars = navigationBarColor.luminance() > 0.5f
+                    }
                 }
                 val navController = rememberNavController()
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->

@@ -26,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.navigation.NavController
 import com.ash.simpledataentry.data.sync.SyncStatusController
 import org.hisp.dhis.mobile.ui.designsystem.component.Title
@@ -75,21 +74,19 @@ fun BaseScreen(
         MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
     }
     val view = LocalView.current
-    val isLightTheme = !isSystemInDarkTheme()
-    val statusBarColor = if (isLightTheme) {
-        MaterialTheme.colorScheme.surface
-    } else {
+    val statusBarColor = if (usePrimaryTopBar) {
         MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surface
     }
+    val navigationBarColor = MaterialTheme.colorScheme.surface
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
-        val colorInt = statusBarColor.toArgb()
-        window.statusBarColor = colorInt
-        window.navigationBarColor = colorInt
+        window.statusBarColor = statusBarColor.toArgb()
+        window.navigationBarColor = navigationBarColor.toArgb()
         val insetsController = WindowInsetsControllerCompat(window, view)
-        val useDarkIcons = isLightTheme && statusBarColor.luminance() > 0.5f
-        insetsController.isAppearanceLightStatusBars = useDarkIcons
-        insetsController.isAppearanceLightNavigationBars = useDarkIcons
+        insetsController.isAppearanceLightStatusBars = statusBarColor.luminance() > 0.5f
+        insetsController.isAppearanceLightNavigationBars = navigationBarColor.luminance() > 0.5f
     }
 
     Scaffold(
