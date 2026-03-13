@@ -94,6 +94,23 @@ class DatasetInstancesViewModel @Inject constructor(
     private var userSyncInProgress = false
     private val draftDao get() = databaseProvider.getCurrentDatabase().dataValueDraftDao()
 
+    private fun hasInternetConnection(): Boolean {
+        return NetworkUtils.isNetworkAvailable(app.applicationContext)
+    }
+
+    fun canStartSync(): Boolean = hasInternetConnection()
+
+    private fun offlineUiError(): UiError {
+        return UiError.Network(
+            message = "No internet connection. Please check internet connectivity and try again.",
+            canRetry = true
+        )
+    }
+
+    private fun safeMessage(message: String?, fallback: String): String {
+        return message?.takeIf { it.isNotBlank() } ?: fallback
+    }
+
     private fun currentData(): DatasetInstancesData {
         return when (val state = _uiState.value) {
             is UiState.Success -> state.data
@@ -519,6 +536,13 @@ class DatasetInstancesViewModel @Inject constructor(
             Log.e("DatasetInstancesVM", "Cannot sync: programId is empty")
             return
         }
+        if (!hasInternetConnection()) {
+            _uiState.value = UiState.Error(
+                error = offlineUiError(),
+                previousData = lastSuccessfulData
+            )
+            return
+        }
 
         Log.d("DatasetInstancesVM", "Starting enhanced sync for program: $programId, type: $currentProgramType, uploadFirst: $uploadFirst")
         viewModelScope.launch {
@@ -616,6 +640,10 @@ class DatasetInstancesViewModel @Inject constructor(
         onResult: (Boolean, String?) -> Unit
     ) {
         viewModelScope.launch {
+            if (!hasInternetConnection()) {
+                onResult(false, "No internet connection. Please check internet connectivity and try again.")
+                return@launch
+            }
             try {
                 userSyncInProgress = true
                 val result = syncQueueManager.startSyncForInstance(
@@ -642,12 +670,12 @@ class DatasetInstancesViewModel @Inject constructor(
                     },
                     onFailure = { error ->
                         syncQueueManager.clearErrorState()
-                        onResult(false, error.message ?: "Failed to sync entry.")
+                        onResult(false, safeMessage(error.message, "Failed to sync entry. Please try again."))
                     }
                 )
             } catch (e: Exception) {
                 syncQueueManager.clearErrorState()
-                onResult(false, e.message ?: "Failed to sync entry.")
+                onResult(false, safeMessage(e.message, "Failed to sync entry. Please try again."))
             } finally {
                 userSyncInProgress = false
             }

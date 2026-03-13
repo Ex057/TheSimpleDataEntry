@@ -27,6 +27,7 @@ import com.ash.simpledataentry.presentation.login.LoginScreen
 import com.ash.simpledataentry.presentation.login.ManageAccountsLoginScreen
 import com.ash.simpledataentry.presentation.settings.EditAccountScreen
 import com.ash.simpledataentry.presentation.settings.SettingsScreen
+import com.ash.simpledataentry.presentation.settings.SyncErrorLogScreen
 import com.ash.simpledataentry.presentation.tracker.TrackerEnrollmentScreen
 import com.ash.simpledataentry.presentation.tracker.EventCaptureScreen
 import com.ash.simpledataentry.presentation.tracker.TrackerDashboardScreen
@@ -37,6 +38,7 @@ sealed class Screen(val route: String) {
     data object DatasetsScreen : Screen("datasets")
     data class DatasetInstanceScreen(val datasetId: String, val datasetName: String) : Screen("instances")
     data object SettingsScreen : Screen("settings")
+    data object SyncErrorLogScreen : Screen("sync_error_log")
     data object AddAccountScreen : Screen("add_account")
     data object EditAccountScreen : Screen("edit_account")
     data object ManageAccountsLoginScreen : Screen("manage_accounts_login")
@@ -187,6 +189,9 @@ fun AppNavigation(
 
         composable(Screen.SettingsScreen.route) {
             SettingsScreen(navController = navController)
+        }
+        composable(Screen.SyncErrorLogScreen.route) {
+            SyncErrorLogScreen(navController = navController)
         }
         composable(Screen.EditAccountScreen.route) {
             EditAccountScreen(navController = navController)

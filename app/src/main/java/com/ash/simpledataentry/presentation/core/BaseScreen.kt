@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.TopAppBarColors
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -23,7 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.navigation.NavController
@@ -73,20 +74,17 @@ fun BaseScreen(
     } else {
         MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
     }
+    val isDarkTheme = isSystemInDarkTheme()
     val view = LocalView.current
-    val statusBarColor = if (usePrimaryTopBar) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.surface
-    }
-    val navigationBarColor = MaterialTheme.colorScheme.surface
+    val statusBarColor = if (isDarkTheme) Color.Black else Color.White
+    val navigationBarColor = if (isDarkTheme) Color.Black else Color.White
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
         window.statusBarColor = statusBarColor.toArgb()
         window.navigationBarColor = navigationBarColor.toArgb()
-        val insetsController = WindowInsetsControllerCompat(window, view)
-        insetsController.isAppearanceLightStatusBars = statusBarColor.luminance() > 0.5f
-        insetsController.isAppearanceLightNavigationBars = navigationBarColor.luminance() > 0.5f
+        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = !isDarkTheme
+        insetsController.isAppearanceLightNavigationBars = !isDarkTheme
     }
 
     Scaffold(

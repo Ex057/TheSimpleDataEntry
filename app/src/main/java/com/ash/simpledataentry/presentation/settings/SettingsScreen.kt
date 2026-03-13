@@ -22,6 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import android.text.format.DateUtils
+import com.ash.simpledataentry.navigation.Screen
 import com.ash.simpledataentry.presentation.core.BaseScreen
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -114,6 +116,19 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        SyncStatusSummary(
+                            status = state.lastSyncStatus,
+                            lastAttempt = state.lastSyncAttempt,
+                            lastSuccess = state.lastSuccessfulSync,
+                            successCount = state.totalSyncSuccessCount,
+                            failureCount = state.totalSyncFailureCount
+                        )
+                        OutlinedButton(
+                            onClick = { navController.navigate(Screen.SyncErrorLogScreen.route) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Open sync error log")
+                        }
                     }
                 }
             }
@@ -122,17 +137,16 @@ fun SettingsScreen(
             item {
                 SettingsSection(
                     title = "Data Management",
-                    description = "Export data for backup or clear local storage.",
+                    description = "Clear local storage or reset all app data.",
                     icon = Icons.Default.Security
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         DataManagementActions(
-                            isExporting = state.isExporting,
-                            exportProgress = state.exportProgress,
+                            isDeletingLocalData = state.isDeletingLocalData,
                             isDeleting = state.isDeleting,
-                            onExportData = {
+                            onDeleteLocalDataOnly = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                viewModel.exportData()
+                                viewModel.deleteLocalDataOnly()
                             },
                             onDeleteData = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -289,46 +303,37 @@ private fun SyncFrequencySelector(
 
 @Composable
 private fun DataManagementActions(
-    isExporting: Boolean,
-    exportProgress: Float,
+    isDeletingLocalData: Boolean,
     isDeleting: Boolean,
-    onExportData: () -> Unit,
+    onDeleteLocalDataOnly: () -> Unit,
     onDeleteData: () -> Unit,
     enabled: Boolean = true
 ) {
+    var showDeleteLocalConfirmation by remember { mutableStateOf(false) }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        // Export Data Button
-        Button(
-            onClick = onExportData,
-            enabled = enabled && !isExporting && !isDeleting,
+        OutlinedButton(
+            onClick = { if (enabled) showDeleteLocalConfirmation = true },
+            enabled = enabled && !isDeleting && !isDeletingLocalData,
             modifier = Modifier.fillMaxWidth()
         ) {
-            if (isExporting) {
+            if (isDeletingLocalData) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(16.dp),
-                    color = MaterialTheme.colorScheme.onPrimary,
                     strokeWidth = 2.dp
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Exporting... ${(exportProgress * 100).toInt()}%")
+                Text("Deleting local data...")
             } else {
-                Text("Export Data (Offline ZIP)")
+                Text("Delete local data only")
             }
         }
-        
-        if (isExporting) {
-            LinearProgressIndicator(
-                progress = { exportProgress },
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-        
+
         // Delete Data Button  
         OutlinedButton(
             onClick = { if (enabled) showDeleteConfirmation = true },
-            enabled = enabled && !isExporting && !isDeleting,
+            enabled = enabled && !isDeleting && !isDeletingLocalData,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(
                 contentColor = MaterialTheme.colorScheme.error
@@ -349,6 +354,31 @@ private fun DataManagementActions(
         }
     }
     
+    if (showDeleteLocalConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showDeleteLocalConfirmation = false },
+            title = { Text("Delete Local Data Only") },
+            text = {
+                Text("This removes local cached metadata and data values, but keeps your account, login session, and settings.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteLocalDataOnly()
+                        showDeleteLocalConfirmation = false
+                    }
+                ) {
+                    Text("Delete local data")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteLocalConfirmation = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     // Delete Confirmation Dialog
     if (showDeleteConfirmation) {
         AlertDialog(
@@ -376,6 +406,44 @@ private fun DataManagementActions(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun SyncStatusSummary(
+    status: String,
+    lastAttempt: Long?,
+    lastSuccess: Long?,
+    successCount: Int,
+    failureCount: Int
+) {
+    val lastAttemptText = lastAttempt?.let {
+        DateUtils.getRelativeTimeSpanString(
+            it,
+            System.currentTimeMillis(),
+            DateUtils.MINUTE_IN_MILLIS
+        ).toString()
+    } ?: "Never"
+    val lastSuccessText = lastSuccess?.let {
+        DateUtils.getRelativeTimeSpanString(
+            it,
+            System.currentTimeMillis(),
+            DateUtils.MINUTE_IN_MILLIS
+        ).toString()
+    } ?: "Never"
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("Last sync status: $status", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            Text("Last attempt: $lastAttemptText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Last success: $lastSuccessText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Success: $successCount   Failed: $failureCount", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

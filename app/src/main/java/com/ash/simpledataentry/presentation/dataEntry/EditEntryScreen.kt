@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import kotlinx.coroutines.delay
@@ -1713,6 +1714,12 @@ fun EditEntryScreen(
     orgUnit: String,
     attributeOptionCombo: String
 ) {
+    fun safeMessage(message: String?, fallback: String): String {
+        return message?.takeIf { it.isNotBlank() } ?: fallback
+    }
+    val snackbarContainerColor = Color(0xFF1F2937)
+    val snackbarContentColor = Color.White
+
     val state by viewModel.state.collectAsState()
     var lastLoadedParams by remember { mutableStateOf(Quadruple("", "", "", "")) }
     val currentParams = Quadruple(datasetId, period, orgUnit, attributeOptionCombo)
@@ -1782,7 +1789,13 @@ fun EditEntryScreen(
                 isEditEntryContext = true
             ),
             onConfirm = { uploadFirst ->
-                viewModel.syncDataEntry(uploadFirst)
+                if (!viewModel.canStartSync()) {
+                    coroutineScope.launch {
+                        snackbarHostState.showSnackbar("No internet connection. Please check internet connectivity and try again.")
+                    }
+                } else {
+                    viewModel.syncDataEntry(uploadFirst)
+                }
                 showSyncDialog.value = false
             },
             onDismiss = {
@@ -1821,9 +1834,13 @@ fun EditEntryScreen(
                 viewModel.completeDatasetAfterValidation { success, message ->
                     coroutineScope.launch {
                         if (success) {
-                            snackbarHostState.showSnackbar(message ?: "Dataset marked as complete.")
+                            snackbarHostState.showSnackbar(
+                                safeMessage(message, "Dataset marked as complete.")
+                            )
                         } else {
-                            snackbarHostState.showSnackbar(message ?: "Failed to mark as complete.")
+                            snackbarHostState.showSnackbar(
+                                safeMessage(message, "Failed to mark as complete.")
+                            )
                         }
                     }
                 }
@@ -1833,9 +1850,13 @@ fun EditEntryScreen(
                 viewModel.completeDatasetAfterValidation { success, message ->
                     coroutineScope.launch {
                         if (success) {
-                            snackbarHostState.showSnackbar(message ?: "Dataset marked as complete (validation warnings ignored).")
+                            snackbarHostState.showSnackbar(
+                                safeMessage(message, "Dataset marked as complete (validation warnings ignored).")
+                            )
                         } else {
-                            snackbarHostState.showSnackbar(message ?: "Failed to mark as complete.")
+                            snackbarHostState.showSnackbar(
+                                safeMessage(message, "Failed to mark as complete.")
+                            )
                         }
                     }
                 }
@@ -1909,7 +1930,12 @@ fun EditEntryScreen(
             if (it.isSuccess) {
                 showPostSaveDialog = true
             } else {
-                snackbarHostState.showSnackbar(it.exceptionOrNull()?.message ?: "Failed to save some fields.")
+                snackbarHostState.showSnackbar(
+                    safeMessage(
+                        it.exceptionOrNull()?.message,
+                        "Failed to save some fields."
+                    )
+                )
             }
             viewModel.resetSaveFeedback()
         }
@@ -1918,7 +1944,7 @@ fun EditEntryScreen(
     // Handle sync success messages
     LaunchedEffect(state.successMessage) {
         state.successMessage?.let {
-            snackbarHostState.showSnackbar(it)
+            snackbarHostState.showSnackbar(safeMessage(it, "Sync completed."))
             viewModel.clearMessages()
         }
     }
@@ -1926,7 +1952,7 @@ fun EditEntryScreen(
     // Handle sync error messages
     LaunchedEffect(state.error) {
         state.error?.let {
-            snackbarHostState.showSnackbar(it)
+            snackbarHostState.showSnackbar(safeMessage(it, "Sync failed. Please try again."))
             viewModel.clearMessages()
         }
     }
@@ -1962,7 +1988,13 @@ fun EditEntryScreen(
             // Keep sync button in the top bar
             IconButton(
                 onClick = {
-                    showSyncDialog.value = true
+                    if (!viewModel.canStartSync()) {
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("No internet connection. Please check internet connectivity and try again.")
+                        }
+                    } else {
+                        showSyncDialog.value = true
+                    }
                 },
                 enabled = !state.isSyncing
             ) {
@@ -1989,7 +2021,10 @@ fun EditEntryScreen(
                             viewModel.markDatasetIncomplete { success, message ->
                                 coroutineScope.launch {
                                     snackbarHostState.showSnackbar(
-                                        message ?: if (success) "Report reopened for editing." else "Failed to reopen report."
+                                        safeMessage(
+                                            message,
+                                            if (success) "Report reopened for editing." else "Failed to reopen report."
+                                        )
                                     )
                                 }
                             }
@@ -2549,19 +2584,25 @@ fun EditEntryScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 8.dp),
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .zIndex(3f),
                     contentAlignment = Alignment.BottomCenter
                 ) {
                     SnackbarHost(
                         hostState = snackbarHostState,
                         snackbar = { data ->
                             Snackbar(
-                                containerColor = MaterialTheme.colorScheme.surface,
-                                contentColor = Color.White
+                                containerColor = snackbarContainerColor,
+                                contentColor = snackbarContentColor,
+                                actionContentColor = snackbarContentColor
                             ) {
                                 Text(
-                                    data.visuals.message,
-                                    style = MaterialTheme.typography.bodyLarge
+                                    text = safeMessage(data.visuals.message, "Something happened."),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = snackbarContentColor,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }

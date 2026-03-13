@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,7 +39,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalView
@@ -70,15 +70,16 @@ fun StepLoadingScreen(
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
-    val statusBarColor = DHIS2Blue
+    val isDarkTheme = isSystemInDarkTheme()
+    val statusBarColor = if (isDarkTheme) Color.Black else Color.White
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
         val colorInt = statusBarColor.toArgb()
         window.statusBarColor = colorInt
         window.navigationBarColor = colorInt
-        val insetsController = WindowInsetsControllerCompat(window, view)
-        insetsController.isAppearanceLightStatusBars = statusBarColor.luminance() > 0.5f
-        insetsController.isAppearanceLightNavigationBars = statusBarColor.luminance() > 0.5f
+        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = !isDarkTheme
+        insetsController.isAppearanceLightNavigationBars = !isDarkTheme
     }
     val steps = when (type) {
         StepLoadingType.LOGIN -> listOf(

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
@@ -36,7 +37,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowInsetsControllerCompat
 import android.app.Activity
@@ -67,18 +67,19 @@ fun TrackerDashboardScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var selectedTab by rememberSaveable { mutableStateOf(1) }
+    val isDarkTheme = isSystemInDarkTheme()
     val view = LocalView.current
-    val statusBarColor = MaterialTheme.colorScheme.primary
-    val navigationBarColor = MaterialTheme.colorScheme.surface
+    val statusBarColor = if (isDarkTheme) androidx.compose.ui.graphics.Color.Black else androidx.compose.ui.graphics.Color.White
+    val navigationBarColor = if (isDarkTheme) androidx.compose.ui.graphics.Color.Black else androidx.compose.ui.graphics.Color.White
 
     // Explicitly style system bars for this screen to avoid white-on-white icons.
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
         window.statusBarColor = statusBarColor.toArgb()
         window.navigationBarColor = navigationBarColor.toArgb()
-        val controller = WindowInsetsControllerCompat(window, view)
-        controller.isAppearanceLightStatusBars = statusBarColor.luminance() > 0.5f
-        controller.isAppearanceLightNavigationBars = navigationBarColor.luminance() > 0.5f
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.isAppearanceLightStatusBars = !isDarkTheme
+        controller.isAppearanceLightNavigationBars = !isDarkTheme
     }
 
     // Initialize the view model

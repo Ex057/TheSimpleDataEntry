@@ -147,6 +147,34 @@ class DataEntryViewModel @Inject constructor(
     private val lastRefreshByInstance = mutableMapOf<String, Long>()
     private val refreshThrottleMs = 10 * 60 * 1000L
 
+    private fun safeMessage(message: String?, fallback: String): String {
+        return message?.takeIf { it.isNotBlank() } ?: fallback
+    }
+
+    private fun completionErrorMessage(error: Throwable?): String {
+        val raw = error?.message.orEmpty()
+        val cause = error?.cause?.message.orEmpty()
+        val combined = "$raw $cause"
+        return when {
+            combined.contains("AutoValue_D2Error", ignoreCase = true) ||
+            combined.contains("UnknownHostException", ignoreCase = true) ||
+            combined.contains("No address associated with hostname", ignoreCase = true) ||
+            combined.contains("ConnectException", ignoreCase = true) ||
+            combined.contains("SocketTimeoutException", ignoreCase = true) ||
+            combined.contains("timeout", ignoreCase = true) ||
+            combined.contains("Unable to resolve host", ignoreCase = true) -> {
+                "No internet connection. Please check internet connectivity and try again."
+            }
+            else -> safeMessage(raw, "Failed to mark dataset as complete.")
+        }
+    }
+
+    fun canStartSync(): Boolean {
+        val networkState = networkStateManager.networkState.value
+        return (networkState.isConnected && networkState.hasInternet) ||
+            NetworkUtils.isNetworkAvailable(application.applicationContext)
+    }
+
     private fun emitSuccessState() {
         val current = _state.value
         lastSuccessfulState = current
@@ -1356,6 +1384,17 @@ class DataEntryViewModel @Inject constructor(
             Log.e("DataEntryViewModel", "Cannot sync: datasetId is empty")
             return
         }
+        val networkState = networkStateManager.networkState.value
+        if (!networkState.isConnected || !networkState.hasInternet) {
+            updateState {
+                it.copy(
+                    isSyncing = false,
+                    detailedSyncProgress = null,
+                    error = "No internet connection. Please check internet connectivity and try again."
+                )
+            }
+            return
+        }
 
         Log.d("DataEntryViewModel", "Starting enhanced sync for data entry: datasetId=${stateSnapshot.datasetId}, uploadFirst: $uploadFirst")
         viewModelScope.launch {
@@ -1407,7 +1446,10 @@ class DataEntryViewModel @Inject constructor(
                     },
                     onFailure = { error ->
                         Log.e("DataEntryViewModel", "Enhanced sync failed", error)
-                        val errorMessage = error.message ?: "Failed to sync data entry"
+                        val errorMessage = safeMessage(
+                            error.message,
+                            "Failed to sync data entry. Please try again."
+                        )
                         updateState {
                             it.copy(
                                 error = errorMessage,
@@ -1421,7 +1463,10 @@ class DataEntryViewModel @Inject constructor(
                 updateState {
                     it.copy(
                         isSyncing = false,
-                        error = e.message ?: "Failed to sync data entry",
+                        error = safeMessage(
+                            e.message,
+                            "Failed to sync data entry. Please try again."
+                        ),
                         detailedSyncProgress = null
                     )
                 }
@@ -1733,6 +1778,7 @@ class DataEntryViewModel @Inject constructor(
                     onResult(true, successMessage)
                 } else {
                     val ex = result.exceptionOrNull()
+                    val userMessage = completionErrorMessage(ex)
                     Log.e(
                         TAG,
                         "[$attemptId] Failed to mark dataset as complete: type=${ex?.javaClass?.name} message=${ex?.message}",
@@ -1741,10 +1787,10 @@ class DataEntryViewModel @Inject constructor(
                     updateState {
                         it.copy(
                             isLoading = false,
-                            error = ex?.message
+                            error = userMessage
                         )
                     }
-                    onResult(false, ex?.message)
+                    onResult(false, userMessage)
                 }
                 
             } catch (e: Exception) {
@@ -1753,13 +1799,14 @@ class DataEntryViewModel @Inject constructor(
                     "[$attemptId] Error during completion after ${SystemClock.elapsedRealtime() - startMs}ms: ${e.javaClass.name}: ${e.message}",
                     e
                 )
+                val userMessage = completionErrorMessage(e)
                 updateState {
                     it.copy(
                         isLoading = false,
-                        error = "Error during completion: ${e.message}"
+                        error = userMessage
                     )
                 }
-                onResult(false, "Error during completion: ${e.message}")
+                onResult(false, userMessage)
             }
         }
     }

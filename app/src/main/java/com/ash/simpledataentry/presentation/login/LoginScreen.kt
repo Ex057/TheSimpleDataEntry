@@ -92,7 +92,6 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.width
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.compose.ui.graphics.luminance
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.ash.simpledataentry.R
@@ -132,14 +131,9 @@ fun LoginScreen(
     val coroutineScope = rememberCoroutineScope()
     val view = LocalView.current
     val isNetworkAvailable = rememberNetworkAvailable()
-    val isLightTheme = !isSystemInDarkTheme()
-    val isDarkTheme = !isLightTheme
-    val statusBarColor = if (isLightTheme) {
-        MaterialTheme.colorScheme.surface
-    } else {
-        MaterialTheme.colorScheme.primary
-    }
-    val useDarkIcons = isLightTheme && statusBarColor.luminance() > 0.5f
+    val isDarkTheme = isSystemInDarkTheme()
+    val statusBarColor = if (isDarkTheme) Color.Black else Color.White
+    val useDarkIcons = !isDarkTheme
 
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect

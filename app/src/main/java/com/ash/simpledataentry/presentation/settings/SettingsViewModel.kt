@@ -8,8 +8,12 @@ import com.ash.simpledataentry.data.security.AccountEncryption
 import com.ash.simpledataentry.domain.model.SavedAccount
 import com.ash.simpledataentry.domain.repository.SettingsRepository
 import com.ash.simpledataentry.data.sync.BackgroundSyncManager
+import com.ash.simpledataentry.data.sync.SyncLogEntry
+import com.ash.simpledataentry.data.sync.SyncQueueManager
+import com.ash.simpledataentry.data.RoomHydrationMode
 import com.ash.simpledataentry.data.DatabaseProvider
 import com.ash.simpledataentry.data.SessionManager
+import com.ash.simpledataentry.data.cache.MetadataCacheService
 import com.ash.simpledataentry.presentation.core.UiState
 import com.ash.simpledataentry.presentation.core.UiError
 import com.ash.simpledataentry.presentation.core.LoadingOperation
@@ -29,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.ash.simpledataentry.BuildConfig
+import com.ash.simpledataentry.util.NetworkUtils
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -52,7 +57,14 @@ data class SettingsData(
     val updateCheckInProgress: Boolean = false,
     val updateAvailable: Boolean = false,
     val latestVersion: String? = null,
-    val currentVersion: String = BuildConfig.VERSION_NAME
+    val currentVersion: String = BuildConfig.VERSION_NAME,
+    val isDeletingLocalData: Boolean = false,
+    val lastSyncStatus: String = "Idle",
+    val lastSyncAttempt: Long? = null,
+    val lastSuccessfulSync: Long? = null,
+    val totalSyncSuccessCount: Int = 0,
+    val totalSyncFailureCount: Int = 0,
+    val syncErrorLogs: List<SyncLogEntry> = emptyList()
 )
 
 
@@ -71,6 +83,8 @@ class SettingsViewModel @Inject constructor(
     private val accountEncryption: AccountEncryption,
     private val settingsRepository: SettingsRepository,
     private val backgroundSyncManager: BackgroundSyncManager,
+    private val syncQueueManager: SyncQueueManager,
+    private val metadataCacheService: MetadataCacheService,
     private val databaseProvider: DatabaseProvider,
     private val sessionManager: SessionManager,
     @ApplicationContext private val appContext: Context
@@ -85,6 +99,8 @@ class SettingsViewModel @Inject constructor(
     init {
         checkEncryptionAvailability()
         loadSyncFrequency()
+        observeSyncStatus()
+        observeSyncLogs()
     }
     
     fun loadAccounts() {
@@ -138,22 +154,50 @@ class SettingsViewModel @Inject constructor(
     fun syncMetadataNow() {
         viewModelScope.launch {
             try {
+                if (!NetworkUtils.isNetworkAvailable(appContext)) {
+                    _uiState.emitSuccess(
+                        getCurrentData().copy(
+                            isMetadataSyncing = false,
+                            metadataSyncMessage = "No internet connection. Please check internet connectivity and try again."
+                        )
+                    )
+                    return@launch
+                }
+
                 val currentData = getCurrentData()
                 _uiState.emitSuccess(
-                    currentData.copy(isMetadataSyncing = true, metadataSyncMessage = null)
+                    currentData.copy(
+                        isMetadataSyncing = true,
+                        metadataSyncMessage = "Refreshing metadata (clearing local cache first)..."
+                    )
                 )
 
-                backgroundSyncManager.triggerImmediateMetadataSync()
+                val db = databaseProvider.getCurrentDatabase()
+                clearMetadataTables(db)
+                metadataCacheService.clearAllCaches()
+
+                val result = sessionManager.downloadMetadataResilient { _ -> }
+                sessionManager.hydrateRoomFromSdk(appContext, db, RoomHydrationMode.MINIMAL)
 
                 _uiState.emitSuccess(
-                    currentData.copy(
+                    getCurrentData().copy(
                         isMetadataSyncing = false,
-                        metadataSyncMessage = "Metadata sync started"
+                        metadataSyncMessage = if (result.hasCriticalFailures) {
+                            "Metadata sync failed: critical metadata missing."
+                        } else if (result.hasAnyFailures) {
+                            "Metadata refreshed with warnings (${result.successful} succeeded, ${result.failed} failed)."
+                        } else {
+                            "Metadata refreshed successfully."
+                        }
                     )
                 )
             } catch (e: Exception) {
-                val uiError = e.toUiError()
-                _uiState.emitError(uiError)
+                _uiState.emitSuccess(
+                    getCurrentData().copy(
+                        isMetadataSyncing = false,
+                        metadataSyncMessage = e.message ?: "Metadata refresh failed."
+                    )
+                )
             }
         }
     }
@@ -161,15 +205,42 @@ class SettingsViewModel @Inject constructor(
     fun downloadFullDataNow() {
         viewModelScope.launch {
             try {
+                if (!NetworkUtils.isNetworkAvailable(appContext)) {
+                    _uiState.emitSuccess(
+                        getCurrentData().copy(
+                            isFullSyncing = false,
+                            fullSyncMessage = "No internet connection. Please check internet connectivity and try again."
+                        )
+                    )
+                    return@launch
+                }
+
                 val currentData = getCurrentData()
                 _uiState.emitSuccess(
-                    currentData.copy(isFullSyncing = true, fullSyncMessage = null)
+                    currentData.copy(
+                        isFullSyncing = true,
+                        fullSyncMessage = "Refreshing metadata and downloading full data..."
+                    )
                 )
+
+                val db = databaseProvider.getCurrentDatabase()
+                clearMetadataTables(db)
+                clearDataTables(db)
+                metadataCacheService.clearAllCaches()
+
+                val metadataResult = sessionManager.downloadMetadataResilient { _ -> }
+                sessionManager.hydrateRoomFromSdk(appContext, db, RoomHydrationMode.MINIMAL)
 
                 sessionManager.startBackgroundDataSync(appContext) { success, message ->
                     val updated = getCurrentData().copy(
                         isFullSyncing = false,
-                        fullSyncMessage = if (success) "Full data sync complete" else message ?: "Full data sync failed"
+                        fullSyncMessage = if (success && !metadataResult.hasCriticalFailures) {
+                            "Full data refresh complete."
+                        } else if (success) {
+                            "Data downloaded, but metadata has critical issues."
+                        } else {
+                            message ?: "Full data sync failed."
+                        }
                     )
                     _uiState.emitSuccess(updated)
                 }
@@ -364,6 +435,43 @@ class SettingsViewModel @Inject constructor(
             }
         }
     }
+
+    fun deleteLocalDataOnly() {
+        viewModelScope.launch {
+            try {
+                val currentData = getCurrentData()
+                _uiState.emitSuccess(currentData.copy(isDeletingLocalData = true), BackgroundOperation.Deleting)
+
+                val database = databaseProvider.getCurrentDatabase()
+                database.dataValueDraftDao().deleteAllDrafts()
+                database.dataValueDao().deleteAllDataValues()
+                database.datasetDao().clearAll()
+                database.trackerProgramDao().clearAll()
+                database.eventProgramDao().clearAll()
+                database.trackerEnrollmentDao().clearAll()
+                database.eventInstanceDao().clearAll()
+                database.dataElementDao().clearAll()
+                database.categoryComboDao().clearAll()
+                database.categoryOptionComboDao().clearAll()
+                database.organisationUnitDao().clearAll()
+                database.cachedUrlDao().clearAll()
+
+                _uiState.emitSuccess(
+                    getCurrentData().copy(
+                        isDeletingLocalData = false,
+                        metadataSyncMessage = "Local data deleted. You can now sync fresh data."
+                    )
+                )
+            } catch (e: Exception) {
+                val uiError = e.toUiError()
+                _uiState.emitError(uiError)
+            }
+        }
+    }
+
+    fun clearSyncErrorLogs() {
+        syncQueueManager.clearSyncLogs()
+    }
     
     fun checkForUpdates() {
         viewModelScope.launch {
@@ -459,5 +567,47 @@ class SettingsViewModel @Inject constructor(
 
     private fun normalizeVersion(version: String): String {
         return Regex("\\d+(?:\\.\\d+)*").find(version)?.value ?: version
+    }
+
+    private suspend fun clearMetadataTables(database: com.ash.simpledataentry.data.local.AppDatabase) {
+        database.datasetDao().clearAll()
+        database.dataElementDao().clearAll()
+        database.categoryComboDao().clearAll()
+        database.categoryOptionComboDao().clearAll()
+        database.organisationUnitDao().clearAll()
+        database.trackerProgramDao().clearAll()
+        database.eventProgramDao().clearAll()
+        database.cachedUrlDao().clearAll()
+    }
+
+    private suspend fun clearDataTables(database: com.ash.simpledataentry.data.local.AppDatabase) {
+        database.dataValueDraftDao().deleteAllDrafts()
+        database.dataValueDao().deleteAllDataValues()
+        database.trackerEnrollmentDao().clearAll()
+        database.eventInstanceDao().clearAll()
+    }
+
+    private fun observeSyncStatus() {
+        viewModelScope.launch {
+            syncQueueManager.syncState.collect { syncState ->
+                _uiState.emitSuccess(
+                    getCurrentData().copy(
+                        lastSyncStatus = syncState.lastSyncStatus,
+                        lastSyncAttempt = syncState.lastSyncAttempt,
+                        lastSuccessfulSync = syncState.lastSuccessfulSync,
+                        totalSyncSuccessCount = syncState.totalSuccessCount,
+                        totalSyncFailureCount = syncState.totalFailureCount
+                    )
+                )
+            }
+        }
+    }
+
+    private fun observeSyncLogs() {
+        viewModelScope.launch {
+            syncQueueManager.syncLogs.collect { logs ->
+                _uiState.emitSuccess(getCurrentData().copy(syncErrorLogs = logs))
+            }
+        }
     }
 }

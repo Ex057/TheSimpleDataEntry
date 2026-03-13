@@ -16,6 +16,7 @@ import com.ash.simpledataentry.data.local.DataValueDraftEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.ash.simpledataentry.data.local.DataElementDao
+import com.ash.simpledataentry.data.local.DataElementEntity
 import com.ash.simpledataentry.data.local.CategoryComboDao
 import com.ash.simpledataentry.data.local.CategoryOptionComboDao
 import com.ash.simpledataentry.data.local.CategoryOptionComboEntity
@@ -337,13 +338,71 @@ class DataEntryRepositoryImpl @Inject constructor(
         comboOverrides.forEach { (comboId, overrides) ->
             combosByComboId[comboId] = overrides
         }
+        val dataElementsByUid = optimizedData.dataElements.toMutableMap()
+        val sdkDataElementFallbacks = mutableMapOf<String, DataElementEntity?>()
 
         val loggedComboIds = mutableSetOf<String>()
         val mappedDataValues = optimizedData.sections.flatMap { section ->
             val sectionResults = section.dataElementUids.flatMap { deUid ->
-                val dataElement = optimizedData.dataElements[deUid]
+                val dataElement = dataElementsByUid[deUid] ?: run {
+                    val sdkEntity = sdkDataElementFallbacks.getOrPut(deUid) {
+                        try {
+                            d2.dataElementModule().dataElements().uid(deUid).blockingGet()?.let { sdkDe ->
+                                DataElementEntity(
+                                    id = sdkDe.uid(),
+                                    name = sdkDe.displayName() ?: sdkDe.uid(),
+                                    valueType = sdkDe.valueType()?.name ?: "TEXT",
+                                    categoryComboId = sdkDe.categoryCombo()?.uid(),
+                                    description = sdkDe.description()
+                                )
+                            }
+                        } catch (e: Exception) {
+                            Log.w(
+                                "DataEntryRepositoryImpl",
+                                "Failed SDK fallback for dataElement=$deUid: ${e.message}"
+                            )
+                            null
+                        }
+                    }
+                    if (sdkEntity != null) {
+                        dataElementsByUid[deUid] = sdkEntity
+                    }
+                    sdkEntity
+                }
+
                 val comboId = dataElement?.categoryComboId ?: ""
-                val combos = combosByComboId[comboId].orEmpty()
+                var combos = combosByComboId[comboId].orEmpty()
+
+                if (comboId.isNotBlank() && combos.isEmpty()) {
+                    val fetchedCombos = try {
+                        d2.categoryModule().categoryOptionCombos()
+                            .byCategoryComboUid().eq(comboId)
+                            .withCategoryOptions()
+                            .blockingGet()
+                            .map { coc ->
+                                CategoryOptionComboEntity(
+                                    id = coc.uid(),
+                                    name = coc.displayName() ?: coc.uid(),
+                                    categoryComboId = coc.categoryCombo()?.uid() ?: comboId,
+                                    optionUids = coc.categoryOptions()?.joinToString(",") { opt -> opt.uid() } ?: ""
+                                )
+                            }
+                    } catch (e: Exception) {
+                        Log.w(
+                            "DataEntryRepositoryImpl",
+                            "Failed COC fallback for comboId=$comboId: ${e.message}"
+                        )
+                        emptyList()
+                    }
+                    if (fetchedCombos.isNotEmpty()) {
+                        combosByComboId[comboId] = fetchedCombos
+                        combos = fetchedCombos
+                        Log.w(
+                            "DataEntryRepositoryImpl",
+                            "Recovered missing COCs for comboId=$comboId via SDK fallback: ${fetchedCombos.size}"
+                        )
+                    }
+                }
 
                 if (deUid == "mZeRxcTNykN") {
                     Log.d(

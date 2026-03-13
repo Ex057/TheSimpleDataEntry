@@ -22,7 +22,16 @@ data class SyncState(
     val lastSyncAttempt: Long? = null,
     val lastSuccessfulSync: Long? = null,
     val failedAttempts: Int = 0,
-    val error: String? = null
+    val error: String? = null,
+    val lastSyncStatus: String = "Idle",
+    val totalSuccessCount: Int = 0,
+    val totalFailureCount: Int = 0
+)
+
+data class SyncLogEntry(
+    val timestamp: Long,
+    val level: String,
+    val message: String
 )
 
 enum class SyncPhase(val title: String, val defaultDetail: String) {
@@ -111,10 +120,25 @@ class SyncQueueManager @Inject constructor(
 
     private val _detailedProgress = MutableStateFlow<DetailedSyncProgress?>(null)
     val detailedProgress: StateFlow<DetailedSyncProgress?> = _detailedProgress.asStateFlow()
+    private val _syncLogs = MutableStateFlow<List<SyncLogEntry>>(emptyList())
+    val syncLogs: StateFlow<List<SyncLogEntry>> = _syncLogs.asStateFlow()
 
     private var syncJob: Job? = null
     private var networkMonitorJob: Job? = null
     private var autoRetryJob: Job? = null
+
+    private fun addSyncLog(level: String, message: String) {
+        val entry = SyncLogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = level,
+            message = message
+        )
+        _syncLogs.value = (_syncLogs.value + entry).takeLast(200)
+    }
+
+    fun clearSyncLogs() {
+        _syncLogs.value = emptyList()
+    }
 
     // DHIS2 SDK standard timeout configuration (v1.3.1+)
     private val uploadTimeoutMs = 600000L // 10 minutes - DHIS2 Android SDK standard since v1.3.1
@@ -273,8 +297,11 @@ class SyncQueueManager @Inject constructor(
                 _syncState.value = _syncState.value.copy(
                     isRunning = false,
                     error = errorMessage,
-                    failedAttempts = _syncState.value.failedAttempts + 1
+                    failedAttempts = _syncState.value.failedAttempts + 1,
+                    lastSyncStatus = "Failed",
+                    totalFailureCount = _syncState.value.totalFailureCount + 1
                 )
+                addSyncLog("ERROR", errorMessage)
                 clearDetailedProgress() // CRITICAL: Clear overlay on any error
             }
         }
@@ -300,7 +327,8 @@ class SyncQueueManager @Inject constructor(
         _syncState.value = _syncState.value.copy(
             isRunning = true,
             lastSyncAttempt = System.currentTimeMillis(),
-            error = null
+            error = null,
+            lastSyncStatus = "Running"
         )
 
         // Acquire wake lock to prevent interruption
@@ -335,8 +363,11 @@ class SyncQueueManager @Inject constructor(
                     isRunning = false,
                     queueSize = 0,
                     lastSuccessfulSync = System.currentTimeMillis(),
-                    failedAttempts = 0
+                    failedAttempts = 0,
+                    lastSyncStatus = "Success",
+                    totalSuccessCount = _syncState.value.totalSuccessCount + 1
                 )
+                addSyncLog("INFO", "Sync completed successfully (no pending drafts).")
                 clearDetailedProgress()
                 return
             }
@@ -440,8 +471,11 @@ class SyncQueueManager @Inject constructor(
                 queueSize = databaseProvider.getCurrentDatabase().dataValueDraftDao().getAllDrafts().size,
                 lastSuccessfulSync = System.currentTimeMillis(),
                 failedAttempts = 0,
-                error = null
+                error = null,
+                lastSyncStatus = "Success",
+                totalSuccessCount = _syncState.value.totalSuccessCount + 1
             )
+            addSyncLog("INFO", "Sync completed successfully.")
 
             updateProgress(SyncPhase.FINALIZING, 100, "Sync completed successfully")
 
@@ -465,8 +499,11 @@ class SyncQueueManager @Inject constructor(
                     is SyncError.ServerError -> error.message
                     is SyncError.ValidationError -> error.message
                     is SyncError.UnknownError -> error.message
-                }
+                },
+                lastSyncStatus = "Failed",
+                totalFailureCount = _syncState.value.totalFailureCount + 1
             )
+            addSyncLog("ERROR", _syncState.value.error ?: "Sync failed")
 
             // Don't clear progress on error - let user see error state and navigate back
             if (_detailedProgress.value?.error == null) {
@@ -482,7 +519,8 @@ class SyncQueueManager @Inject constructor(
         _syncState.value = _syncState.value.copy(
             isRunning = true,
             lastSyncAttempt = System.currentTimeMillis(),
-            error = null
+            error = null,
+            lastSyncStatus = "Running"
         )
 
         try {
@@ -599,8 +637,11 @@ class SyncQueueManager @Inject constructor(
             _syncState.value = _syncState.value.copy(
                 isRunning = false,
                 lastSuccessfulSync = System.currentTimeMillis(),
-                error = null
+                error = null,
+                lastSyncStatus = "Success",
+                totalSuccessCount = _syncState.value.totalSuccessCount + 1
             )
+            addSyncLog("INFO", "Download-only sync completed successfully.")
 
             // Clear progress after successful completion
             _detailedProgress.value = null
@@ -622,7 +663,8 @@ class SyncQueueManager @Inject constructor(
         _syncState.value = _syncState.value.copy(
             isRunning = true,
             lastSyncAttempt = System.currentTimeMillis(),
-            error = null
+            error = null,
+            lastSyncStatus = "Running"
         )
 
         try {
@@ -633,7 +675,7 @@ class SyncQueueManager @Inject constructor(
 
 
             if (!networkStateManager.isOnline()) {
-                throw Exception("No internet connection available")
+                throw Exception("No internet connection. Please check internet connectivity and try again.")
             }
 
             // Get drafts for specific dataset instance only
@@ -648,8 +690,11 @@ class SyncQueueManager @Inject constructor(
                     isRunning = false,
                     queueSize = databaseProvider.getCurrentDatabase().dataValueDraftDao().getAllDrafts().size,
                     lastSuccessfulSync = System.currentTimeMillis(),
-                    failedAttempts = 0
+                    failedAttempts = 0,
+                    lastSyncStatus = "Success",
+                    totalSuccessCount = _syncState.value.totalSuccessCount + 1
                 )
+                addSyncLog("INFO", "Instance sync completed successfully (no pending drafts).")
                 return
             }
 
@@ -795,8 +840,16 @@ class SyncQueueManager @Inject constructor(
                 queueSize = databaseProvider.getCurrentDatabase().dataValueDraftDao().getAllDrafts().size,
                 lastSuccessfulSync = if (allSuccessfulDrafts.isNotEmpty()) System.currentTimeMillis() else _syncState.value.lastSuccessfulSync,
                 failedAttempts = if (allSuccessfulDrafts.isNotEmpty()) 0 else _syncState.value.failedAttempts + 1,
-                error = if (allSuccessfulDrafts.isEmpty()) "Upload failed for dataset instance" else null
+                error = if (allSuccessfulDrafts.isEmpty()) "Upload failed for dataset instance" else null,
+                lastSyncStatus = if (allSuccessfulDrafts.isNotEmpty()) "Success" else "Failed",
+                totalSuccessCount = if (allSuccessfulDrafts.isNotEmpty()) _syncState.value.totalSuccessCount + 1 else _syncState.value.totalSuccessCount,
+                totalFailureCount = if (allSuccessfulDrafts.isEmpty()) _syncState.value.totalFailureCount + 1 else _syncState.value.totalFailureCount
             )
+            if (allSuccessfulDrafts.isNotEmpty()) {
+                addSyncLog("INFO", "Instance sync completed successfully.")
+            } else {
+                addSyncLog("ERROR", "Upload failed for dataset instance.")
+            }
 
             Log.d(tag, "Sync completed for instance - ${allSuccessfulDrafts.size} values uploaded successfully")
 
@@ -813,8 +866,11 @@ class SyncQueueManager @Inject constructor(
             _syncState.value = _syncState.value.copy(
                 isRunning = false,
                 failedAttempts = _syncState.value.failedAttempts + 1,
-                error = userFriendlyError
+                error = userFriendlyError,
+                lastSyncStatus = "Failed",
+                totalFailureCount = _syncState.value.totalFailureCount + 1
             )
+            addSyncLog("ERROR", userFriendlyError)
             // CRITICAL: Always clear detailed progress on instance sync failure
             clearDetailedProgress()
         }
@@ -825,8 +881,10 @@ class SyncQueueManager @Inject constructor(
         autoRetryJob?.cancel()
         _syncState.value = _syncState.value.copy(
             isRunning = false,
-            error = "Sync cancelled by user"
+            error = "Sync cancelled by user",
+            lastSyncStatus = "Cancelled"
         )
+        addSyncLog("WARN", "Sync cancelled by user.")
         clearDetailedProgress()
     }
     
@@ -905,8 +963,11 @@ class SyncQueueManager @Inject constructor(
                 is SyncError.ServerError -> error.message
                 is SyncError.UnknownError -> error.message
             },
-            failedAttempts = _syncState.value.failedAttempts + 1
+            failedAttempts = _syncState.value.failedAttempts + 1,
+            lastSyncStatus = "Failed",
+            totalFailureCount = _syncState.value.totalFailureCount + 1
         )
+        addSyncLog("ERROR", _syncState.value.error ?: "Sync failed")
     }
 
     /**
@@ -943,7 +1004,7 @@ class SyncQueueManager @Inject constructor(
             val networkState = networkStateManager.networkState.value
             if (!networkState.isConnected || !networkState.hasInternet) {
                 Log.w(tag, "Network not available for sync")
-                setErrorState(SyncError.NetworkError("No internet connection available"))
+                setErrorState(SyncError.NetworkError("No internet connection. Please check internet connectivity and try again."))
                 return false
             }
 
@@ -1021,7 +1082,15 @@ class SyncQueueManager @Inject constructor(
                 Log.w(tag, "D2Error detected - DHIS2 SDK specific error")
 
                 // Extract the actual error message from nested D2Error
-                val actualMessage = exception.message ?: exception.cause?.message ?: "Unknown D2Error"
+                val rawMessage = exception.message ?: exception.cause?.message ?: "Unknown D2Error"
+                val actualMessage = if (
+                    rawMessage.contains("AutoValue_D2Error", ignoreCase = true) ||
+                    rawMessage.contains("org.hisp.dhis.android.core.maintenance", ignoreCase = true)
+                ) {
+                    "Server connection issue"
+                } else {
+                    rawMessage
+                }
 
                 // Check if it's a network/timeout-related D2Error that can be retried
                 val canRetry = actualMessage.let { msg ->
@@ -1213,7 +1282,16 @@ class SyncQueueManager @Inject constructor(
             }
             // Default message
             else -> {
-                exception.message ?: "Sync failed. Please try again."
+                val raw = exception.message
+                if (
+                    raw.isNullOrBlank() ||
+                    raw.contains("AutoValue_D2Error", ignoreCase = true) ||
+                    raw.contains("org.hisp.dhis.android.core.maintenance", ignoreCase = true)
+                ) {
+                    "Sync failed due to a server or connection issue. Please try again."
+                } else {
+                    raw
+                }
             }
         }
     }

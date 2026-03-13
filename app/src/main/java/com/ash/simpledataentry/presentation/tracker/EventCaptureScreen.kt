@@ -35,7 +35,6 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -111,11 +110,11 @@ fun EventCaptureScreen(
 
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
-        val barColor = colorScheme.surface.toArgb()
+        val barColor = if (isDarkTheme) Color.Black.toArgb() else Color.White.toArgb()
         window.statusBarColor = barColor
         window.navigationBarColor = barColor
-        WindowInsetsControllerCompat(window, view).apply {
-            val useDarkIcons = !isDarkTheme && colorScheme.surface.luminance() > 0.5f
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            val useDarkIcons = !isDarkTheme
             isAppearanceLightStatusBars = useDarkIcons
             isAppearanceLightNavigationBars = useDarkIcons
         }

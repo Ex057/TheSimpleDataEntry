@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +24,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
@@ -98,14 +98,15 @@ class MainActivity : ComponentActivity() {
             val isRestoring by isRestoringSession.collectAsState()
             SimpleDataEntryTheme {
                 if (isRestoring) {
-                    val statusBarColor = MaterialTheme.colorScheme.surface
-                    val navigationBarColor = MaterialTheme.colorScheme.surface
+                    val isDarkTheme = isSystemInDarkTheme()
+                    val statusBarColor = if (isDarkTheme) Color.Black else Color.White
+                    val navigationBarColor = if (isDarkTheme) Color.Black else Color.White
                     SideEffect {
                         window.statusBarColor = statusBarColor.toArgb()
                         window.navigationBarColor = navigationBarColor.toArgb()
                         val insetsController = WindowInsetsControllerCompat(window, window.decorView)
-                        insetsController.isAppearanceLightStatusBars = statusBarColor.luminance() > 0.5f
-                        insetsController.isAppearanceLightNavigationBars = navigationBarColor.luminance() > 0.5f
+                        insetsController.isAppearanceLightStatusBars = !isDarkTheme
+                        insetsController.isAppearanceLightNavigationBars = !isDarkTheme
                     }
                 }
                 val navController = rememberNavController()
